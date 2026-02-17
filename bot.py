@@ -20,28 +20,36 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import os
 import json
+import ast
 
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
+if not BOT_TOKEN:
+    print("❌ ОШИБКА: BOT_TOKEN не найден в переменных окружения!")
+    BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Заглушка для локального запуска
 
-# Безопасное преобразование ADMIN_IDS из строки в список
+# Правильное преобразование ADMIN_IDS
 ADMIN_IDS_STR = os.environ.get('ADMIN_IDS', '[1981879895]')
+
+# Несколько способов преобразования для надежности
 try:
-    ADMIN_IDS = json.loads(ADMIN_IDS_STR)
-except:
-    # Если json не сработал, пробуем через eval (как запасной вариант)
-    ADMIN_IDS = eval(ADMIN_IDS_STR)
+    # Способ 1: если это строка вида "[123,456]"
+    if ADMIN_IDS_STR.startswith('[') and ADMIN_IDS_STR.endswith(']'):
+        ADMIN_IDS = json.loads(ADMIN_IDS_STR)
+    # Способ 2: если это просто число или числа через запятую
+    else:
+        ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',')]
+except Exception as e:
+    print(f"⚠️ Ошибка преобразования ADMIN_IDS: {e}, использую значение по умолчанию")
+    ADMIN_IDS = [1981879895]  # Значение по умолчанию
+
+# Убеждаемся, что ADMIN_IDS - это список
+if not isinstance(ADMIN_IDS, list):
+    ADMIN_IDS = [ADMIN_IDS]  # Преобразуем в список, если это число
 
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'casino123')
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Инициализация бота
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+print(f"✅ Загружены настройки: ADMIN_IDS={ADMIN_IDS}")
 
 # ==================== ФУНКЦИЯ БЕЗОПАСНОГО РЕДАКТИРОВАНИЯ ====================
 
@@ -3767,5 +3775,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
