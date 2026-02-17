@@ -19,10 +19,19 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import os
+import json
+
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
-ADMIN_IDS_STR = os.environ.get('ADMIN_IDS', '[123456789]')
-ADMIN_IDS = eval(ADMIN_IDS_STR)  # Превращает строку '[123456789]' в список [123456789]
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
+
+# Безопасное преобразование ADMIN_IDS из строки в список
+ADMIN_IDS_STR = os.environ.get('ADMIN_IDS', '[1981879895]')
+try:
+    ADMIN_IDS = json.loads(ADMIN_IDS_STR)
+except:
+    # Если json не сработал, пробуем через eval (как запасной вариант)
+    ADMIN_IDS = eval(ADMIN_IDS_STR)
+
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'casino123')
 
 # Настройка логирования
@@ -3758,4 +3767,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
