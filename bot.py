@@ -1,11 +1,15 @@
-# 1. СНАЧАЛА импорты
 import asyncio
 import logging
 import sqlite3
 import random
-import os
+import time
+import functools  # <- Этого не хватает!
 import json
+import os
 from datetime import datetime, timedelta
+from typing import List, Tuple, Optional
+from contextlib import contextmanager
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -3762,6 +3766,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
