@@ -18,11 +18,12 @@ from aiogram.types import (
     InlineKeyboardButton, CallbackQuery, Message
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-
+import os
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = ""  # <--- ЗАМЕНИТЕ НА ВАШ ТОКЕН
-ADMIN_IDS = []  # <--- ЗАМЕНИТЕ НА ВАШ ID
-ADMIN_PASSWORD = ""
+BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+ADMIN_IDS_STR = os.environ.get('ADMIN_IDS', '[123456789]')
+ADMIN_IDS = eval(ADMIN_IDS_STR)  # Превращает строку '[123456789]' в список [123456789]
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'casino123')
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -3757,3 +3758,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
