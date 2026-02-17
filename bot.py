@@ -1,13 +1,11 @@
+# 1. СНАЧАЛА импорты
 import asyncio
 import logging
 import sqlite3
 import random
-import time
-import functools
+import os
+import json
 from datetime import datetime, timedelta
-from typing import List, Tuple, Optional
-from contextlib import contextmanager
-
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -18,38 +16,34 @@ from aiogram.types import (
     InlineKeyboardButton, CallbackQuery, Message
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-import os
-import json
-import ast
 
-# ==================== НАСТРОЙКИ ====================
+# 2. ПОТОМ настройки (BOT_TOKEN, ADMIN_IDS и т.д.)
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 if not BOT_TOKEN:
-    print("❌ ОШИБКА: BOT_TOKEN не найден в переменных окружения!")
-    BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Заглушка для локального запуска
+    print("❌ ОШИБКА: BOT_TOKEN не найден!")
+    BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 
 # Правильное преобразование ADMIN_IDS
 ADMIN_IDS_STR = os.environ.get('ADMIN_IDS', '[1981879895]')
-
-# Несколько способов преобразования для надежности
 try:
-    # Способ 1: если это строка вида "[123,456]"
     if ADMIN_IDS_STR.startswith('[') and ADMIN_IDS_STR.endswith(']'):
         ADMIN_IDS = json.loads(ADMIN_IDS_STR)
-    # Способ 2: если это просто число или числа через запятую
     else:
         ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',')]
-except Exception as e:
-    print(f"⚠️ Ошибка преобразования ADMIN_IDS: {e}, использую значение по умолчанию")
-    ADMIN_IDS = [1981879895]  # Значение по умолчанию
+except:
+    ADMIN_IDS = [1981879895]
 
-# Убеждаемся, что ADMIN_IDS - это список
 if not isinstance(ADMIN_IDS, list):
-    ADMIN_IDS = [ADMIN_IDS]  # Преобразуем в список, если это число
+    ADMIN_IDS = [ADMIN_IDS]
 
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'casino123')
 
 print(f"✅ Загружены настройки: ADMIN_IDS={ADMIN_IDS}")
+
+# 3. ЗАТЕМ инициализация бота и диспетчера
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
 # ==================== ФУНКЦИЯ БЕЗОПАСНОГО РЕДАКТИРОВАНИЯ ====================
 
@@ -3760,21 +3754,15 @@ async def handle_unknown_callback(callback: CallbackQuery):
     """Обработчик неизвестных callback запросов"""
     await callback.answer("Эта кнопка больше не работает!", show_alert=True)
 
-# ==================== ЗАПУСК ====================
-
+# 5. В САМОМ КОНЦЕ функция main()
 async def main():
-    """Главная функция"""
     init_db()
-    print("✅ Бот запущен и готов к работе!")
-    print(f"🤖 Имя бота: @{(await bot.get_me()).username}")
-    print("📊 База данных: casino_bot.db")
-    print("👥 Администраторы:", ADMIN_IDS)
-    print("🔑 Пароль для входа:", ADMIN_PASSWORD)
-    print("📝 Команда для входа: /admin")
+    print("✅ Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
