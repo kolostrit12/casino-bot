@@ -2163,18 +2163,6 @@ async def claim_free_spin_callback(callback: CallbackQuery):
 # ==================== АДМИН ПАНЕЛЬ ====================
 
 @dp.message(F.text == "⚙️ АДМИН ПАНЕЛЬ")
-async def admin_panel(message: Message, state: FSMContext):
-    """Вход в админ панель"""
-    user_id = message.from_user.id
-    
-    if user_id in ADMIN_IDS:
-        await show_admin_menu(message)
-    else:
-        await message.delete()
-        msg = await message.answer("⛔ Доступ запрещен!")
-        await asyncio.sleep(2)
-        await msg.delete()
-
 async def show_admin_menu(message: Message):
     """Показать меню администратора"""
     notifications_count = get_unread_notifications_count()
@@ -2192,13 +2180,25 @@ async def show_admin_menu(message: Message):
         [InlineKeyboardButton(text="🎡 Управление колесом", callback_data="admin_wheel")],
         [InlineKeyboardButton(text="📋 Управление заданиями", callback_data="admin_tasks")],
         [InlineKeyboardButton(text="🎰 Управление джекпотом", callback_data="admin_jackpot")],
-        [InlineKeyboardButton(text="💣 Настройка Mines", callback_data="admin_mines")],  # Новая кнопка
         [InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_mailing")],
         [InlineKeyboardButton(text="💰 Начислить бонусы", callback_data="admin_add_bonus")],
+        [InlineKeyboardButton(text="💣 Настройка Mines", callback_data="admin_mines")],
     ])
     
     await message.answer(text, reply_markup=keyboard)
 
+@dp.message(F.text == "⚙️ АДМИН")
+async def admin_panel(message: Message, state: FSMContext):
+    """Вход в админ панель"""
+    user_id = message.from_user.id
+    
+    if user_id in ADMIN_IDS:
+        await show_admin_menu(message)
+    else:
+        await message.delete()
+        msg = await message.answer("⛔ Доступ запрещен!")
+        await asyncio.sleep(2)
+        await msg.delete()
 # ==================== УВЕДОМЛЕНИЯ ====================
 
 @dp.callback_query(F.data == "admin_notifications")
@@ -4255,25 +4255,48 @@ async def handle_unknown_callback(callback: CallbackQuery):
 async def main():
     init_db()
     
-    # ВРЕМЕННО: принудительное создание таблицы mines_settings
+    # ВРЕМЕННО: принудительное обновление структуры БД
     try:
         conn = get_db()
         c = conn.cursor()
+        
+        # Создаем таблицу для Mines, если её нет
         c.execute('''CREATE TABLE IF NOT EXISTS mines_settings
                      (id INTEGER PRIMARY KEY CHECK (id=1),
                       default_mines INTEGER DEFAULT 3)''')
+        
+        # Добавляем запись по умолчанию
         c.execute("INSERT OR IGNORE INTO mines_settings (id, default_mines) VALUES (1, 3)")
+        
+        # Проверяем и добавляем колонки для бонусов, если их нет
+        c.execute("PRAGMA table_info(users)")
+        columns = [col['name'] for col in c.fetchall()]
+        
+        if 'last_daily_bonus' not in columns:
+            c.execute("ALTER TABLE users ADD COLUMN last_daily_bonus DATE DEFAULT NULL")
+            print("✅ Добавлена колонка last_daily_bonus")
+        
+        if 'daily_bonus_streak' not in columns:
+            c.execute("ALTER TABLE users ADD COLUMN daily_bonus_streak INTEGER DEFAULT 0")
+            print("✅ Добавлена колонка daily_bonus_streak")
+        
+        if 'last_free_spin' not in columns:
+            c.execute("ALTER TABLE users ADD COLUMN last_free_spin DATE DEFAULT NULL")
+            print("✅ Добавлена колонка last_free_spin")
+        
         conn.commit()
         conn.close()
-        print("✅ Таблица mines_settings создана")
+        print("✅ База данных обновлена")
     except Exception as e:
-        print(f"❌ Ошибка при создании таблицы mines_settings: {e}")
+        print(f"❌ Ошибка обновления БД: {e}")
     
     print("✅ Бот запущен!")
+    await dp.start_polling(bot)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
