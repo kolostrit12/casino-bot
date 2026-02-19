@@ -18,7 +18,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, 
-    InlineKeyboardButton, CallbackQuery, Message
+    InlineKeyboardButton, CallbackQuery, Message, FSInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -4328,8 +4328,10 @@ async def handle_unknown_callback(callback: CallbackQuery):
     await callback.answer("Эта кнопка больше не работает!", show_alert=True)
 
 # ==================== ЗАПУСК ====================
+# ==================== КОМАНДА ДЛЯ БЭКАПА (ТОЛЬКО ДЛЯ АДМИНОВ) ====================
+
 @dp.message(Command("backup"))
-async def backup_database(message: Message):
+async def cmd_backup(message: Message):
     """Команда для скачивания резервной копии БД (только для админов)"""
     user_id = message.from_user.id
     
@@ -4337,6 +4339,8 @@ async def backup_database(message: Message):
     if user_id not in ADMIN_IDS:
         await message.answer("⛔ Доступ запрещен!")
         return
+    
+    await message.answer("🔄 Создаю резервную копию базы данных...")
     
     try:
         # Отправляем файл базы данных
@@ -4361,7 +4365,7 @@ async def backup_database(message: Message):
         await message.answer(f"📊 В базе данных {users_count} пользователей")
         
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"❌ Ошибка при создании бэкапа: {e}")
 
 async def main():
     init_db()  # Создает таблицы, если их нет
@@ -4371,6 +4375,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
