@@ -742,8 +742,11 @@ def get_wheel_prizes() -> List:
         c = conn.cursor()
         c.execute("SELECT * FROM wheel_prizes WHERE is_active = 1 ORDER BY id")
         results = c.fetchall()
-        if results:
-            return [dict(row) for row in results]
+        prizes = [dict(row) for row in results]
+        print(f"🔍 Загружено призов: {len(prizes)}")  # Временный лог
+        return prizes
+    except Exception as e:
+        print(f"❌ Ошибка в get_wheel_prizes: {e}")
         return []
     finally:
         if conn:
@@ -824,21 +827,33 @@ def delete_wheel_prize(prize_id: int):
 
 def spin_wheel() -> dict:
     """Вращение колеса с учетом вероятностей"""
-    prizes = get_wheel_prizes()
-    
-    if not prizes:
+    try:
+        prizes = get_wheel_prizes()
+        print(f"🔍 Призы для колеса: {prizes}")
+        
+        if not prizes:
+            print("⚠️ Призы не найдены, возвращаем пусто")
+            return {"name": "Пусто", "type": "empty", "value": 0}
+        
+        total_probability = sum(prize['probability'] for prize in prizes)
+        print(f"🔍 Сумма вероятностей: {total_probability}")
+        
+        if total_probability != 100:
+            factor = 100 / total_probability
+            for prize in prizes:
+                prize['probability'] = int(prize['probability'] * factor)
+        
+        weights = [p['probability'] for p in prizes]
+        print(f"🔍 Веса: {weights}")
+        
+        chosen_index = random.choices(range(len(prizes)), weights=weights)[0]
+        result = prizes[chosen_index]
+        print(f"🔍 Выбран приз: {result}")
+        
+        return result
+    except Exception as e:
+        print(f"❌ Ошибка в spin_wheel: {e}")
         return {"name": "Пусто", "type": "empty", "value": 0}
-    
-    total_probability = sum(prize['probability'] for prize in prizes)
-    
-    if total_probability != 100:
-        factor = 100 / total_probability
-        for prize in prizes:
-            prize['probability'] = int(prize['probability'] * factor)
-    
-    chosen_index = random.choices(range(len(prizes)), weights=[p['probability'] for p in prizes])[0]
-    
-    return prizes[chosen_index]
 
 # ==================== ФУНКЦИИ ДЛЯ ЗАДАНИЙ ====================
 
@@ -1526,7 +1541,8 @@ def calculate_potential_win(bet: int, mines_count: int, current_step: int) -> in
     next_step = current_step + 1
     multiplier = get_multiplier(mines_count, next_step)
     return int(bet * multiplier)
-# ==================== ФУНКЦИИ СТАТИСТИКИ ====================
+
+    # ==================== ФУНКЦИИ СТАТИСТИКИ ====================
 
 @retry_on_locked()
 def get_statistics() -> dict:
@@ -1589,7 +1605,8 @@ def get_main_keyboard(user_id: int = None):
     
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
-# ==================== ОБРАБОТЧИКИ ПОЛЬЗОВАТЕЛЬСКОЙ ЧАСТИ ====================
+
+    # ==================== ОБРАБОТЧИКИ ПОЛЬЗОВАТЕЛЬСКОЙ ЧАСТИ ====================
 
 @dp.message(CommandStart())
 async def command_start(message: Message, command: CommandStart):
@@ -1959,7 +1976,7 @@ async def task_callback(callback: CallbackQuery):
             reply_markup=keyboard
         )
 
-@dp.message(F.text == "🎡 КОЛЕСО ФОРТУНЫ")
+@dp.message(F.text == "🎡 КОЛЕСО")
 async def wheel_of_fortune(message: Message):
     """Колесо фортуны"""
     user_id = message.from_user.id
@@ -1973,7 +1990,6 @@ async def wheel_of_fortune(message: Message):
         )
         return
     
-    # Создаем клавиатуру с одной кнопкой, которую можно нажимать многократно
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🎡 КРУТИТЬ КОЛЕСО (осталось {spins})", callback_data="spin_wheel")]
     ])
@@ -1984,7 +2000,6 @@ async def wheel_of_fortune(message: Message):
         f"Нажми кнопку ниже, чтобы крутить колесо!",
         reply_markup=keyboard
     )
-    # Убираем второе сообщение "Выберите действие"
 
 @dp.callback_query(F.data == "spin_wheel")
 async def spin_wheel_callback(callback: CallbackQuery):
@@ -1995,14 +2010,19 @@ async def spin_wheel_callback(callback: CallbackQuery):
     
     try:
         spins = get_user_spins(user_id)
+        print(f"🔍 Попыток у пользователя {user_id}: {spins}")
         
         if spins <= 0:
             await safe_edit_message(callback.message, "❌ У тебя нет попыток! Забери бесплатную попытку в разделе БОНУСЫ.")
             return
         
+        # Списываем попытку
         update_user_spins(user_id, -1)
+        print(f"✅ Попытка списана")
         
+        # Крутим колесо
         result = spin_wheel()
+        print(f"✅ Результат вращения: {result}")
         
         await safe_edit_message(callback.message, "🎡 Колесо вращается... 🎡")
         await asyncio.sleep(2)
@@ -2026,8 +2046,6 @@ async def spin_wheel_callback(callback: CallbackQuery):
                 use_jackpot_promocode(promo['id'], user_id)
                 update_user_stats(user_id, add_win=True)
                 
-                # Получаем информацию о пользователе
-                user_data = get_user_data(user_id)
                 user_display = get_user_display(user_id, callback.from_user.username, callback.from_user.first_name)
                 
                 result_text = f"🎰 ДЖЕКПОТ!\n\nПромокод: {promo['promo_code']}"
@@ -2057,10 +2075,8 @@ async def spin_wheel_callback(callback: CallbackQuery):
             f"💰 Баллов: {new_points}"
         )
         
-        # Обновляем сообщение с результатом
         await safe_edit_message(callback.message, final_text)
         
-        # Если остались попытки, показываем обновленную кнопку в новом сообщении
         if new_spins > 0:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"🎡 КРУТИТЬ ЕЩЕ (осталось {new_spins})", callback_data="spin_wheel")]
@@ -2071,7 +2087,9 @@ async def spin_wheel_callback(callback: CallbackQuery):
                                         reply_markup=get_main_keyboard(user_id))
     
     except Exception as e:
-        logger.error(f"Ошибка в spin_wheel_callback: {e}")
+        print(f"❌ Ошибка в spin_wheel_callback: {e}")
+        import traceback
+        traceback.print_exc()
         await safe_edit_message(callback.message, "❌ Произошла ошибка при вращении колеса. Попробуйте еще раз.")
 
 @dp.message(F.text == "🏪 МАГАЗИН")
@@ -4319,6 +4337,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
