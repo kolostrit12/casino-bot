@@ -3997,7 +3997,7 @@ async def mines_game(message: Message, state: FSMContext):
     )
 
 @dp.callback_query(F.data == "admin_mines")
-async def admin_mines_settings(callback: CallbackQuery):
+async def admin_mines_settings(callback: CallbackQuery, state: FSMContext):
     """Настройка игры Mines"""
     await callback.answer()
     
@@ -4017,7 +4017,8 @@ async def admin_mines_settings(callback: CallbackQuery):
     text += "Введите новое значение по умолчанию (2, 3, 5, 10, 24):"
     
     await callback.message.edit_text(text)
-    await AdminStates.waiting_for_mines_count.set()
+    # ВАЖНО: используем правильное состояние
+    await state.set_state(AdminStates.waiting_for_mines_count)
 
 @dp.message(AdminStates.waiting_for_mines_count)
 async def admin_mines_set_default(message: Message, state: FSMContext):
@@ -4253,11 +4254,27 @@ async def handle_unknown_callback(callback: CallbackQuery):
 # 5. В САМОМ КОНЦЕ функция main()
 async def main():
     init_db()
+    
+    # ВРЕМЕННО: принудительное создание таблицы mines_settings
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS mines_settings
+                     (id INTEGER PRIMARY KEY CHECK (id=1),
+                      default_mines INTEGER DEFAULT 3)''')
+        c.execute("INSERT OR IGNORE INTO mines_settings (id, default_mines) VALUES (1, 3)")
+        conn.commit()
+        conn.close()
+        print("✅ Таблица mines_settings создана")
+    except Exception as e:
+        print(f"❌ Ошибка при создании таблицы mines_settings: {e}")
+    
     print("✅ Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
