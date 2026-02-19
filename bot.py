@@ -4328,6 +4328,40 @@ async def handle_unknown_callback(callback: CallbackQuery):
     await callback.answer("Эта кнопка больше не работает!", show_alert=True)
 
 # ==================== ЗАПУСК ====================
+@dp.message(Command("backup"))
+async def backup_database(message: Message):
+    """Команда для скачивания резервной копии БД (только для админов)"""
+    user_id = message.from_user.id
+    
+    # Проверяем, является ли пользователь админом
+    if user_id not in ADMIN_IDS:
+        await message.answer("⛔ Доступ запрещен!")
+        return
+    
+    try:
+        # Отправляем файл базы данных
+        with open('casino_bot.db', 'rb') as f:
+            file_data = f.read()
+            
+        await message.answer_document(
+            types.input_file.BufferedInputFile(
+                file_data,
+                filename=f'casino_bot_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+            ),
+            caption="📦 Резервная копия базы данных"
+        )
+        
+        # Показываем статистику
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) as count FROM users")
+        users_count = c.fetchone()['count']
+        conn.close()
+        
+        await message.answer(f"📊 В базе данных {users_count} пользователей")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 
 async def main():
     init_db()  # Создает таблицы, если их нет
@@ -4337,6 +4371,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
