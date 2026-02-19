@@ -134,13 +134,13 @@ def retry_on_locked(max_retries=5, delay=0.1):
     return decorator
 
 def init_db():
-    """Инициализация базы данных"""
+    """Инициализация базы данных (с сохранением существующих данных)"""
     conn = None
     try:
         conn = get_db()
         c = conn.cursor()
         
-        # Таблица пользователей
+        # Таблица пользователей (с проверкой существования)
         c.execute('''CREATE TABLE IF NOT EXISTS users
                      (user_id INTEGER PRIMARY KEY,
                       username TEXT,
@@ -148,12 +148,38 @@ def init_db():
                       points INTEGER DEFAULT 0,
                       spins INTEGER DEFAULT 3,
                       referrer_id INTEGER DEFAULT NULL,
-                      joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                      total_spins INTEGER DEFAULT 0,
-                      total_wins INTEGER DEFAULT 0,
-                      last_daily_bonus DATE DEFAULT NULL,
-                      daily_bonus_streak INTEGER DEFAULT 0,
-                      last_free_spin DATE DEFAULT NULL)''')
+                      joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        # Добавляем новые колонки в users, если их нет
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN total_spins INTEGER DEFAULT 0")
+            print("✅ Добавлена колонка total_spins")
+        except sqlite3.OperationalError:
+            pass  # колонка уже существует
+        
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN total_wins INTEGER DEFAULT 0")
+            print("✅ Добавлена колонка total_wins")
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN last_daily_bonus DATE DEFAULT NULL")
+            print("✅ Добавлена колонка last_daily_bonus")
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN daily_bonus_streak INTEGER DEFAULT 0")
+            print("✅ Добавлена колонка daily_bonus_streak")
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN last_free_spin DATE DEFAULT NULL")
+            print("✅ Добавлена колонка last_free_spin")
+        except sqlite3.OperationalError:
+            pass
         
         # Таблица заданий
         c.execute('''CREATE TABLE IF NOT EXISTS tasks
@@ -182,12 +208,17 @@ def init_db():
                       name TEXT,
                       price INTEGER,
                       promo_code TEXT,
-                      project_id INTEGER DEFAULT NULL,
                       is_used BOOLEAN DEFAULT 0,
                       buyer_id INTEGER DEFAULT NULL,
                       bought_at TIMESTAMP DEFAULT NULL,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (project_id) REFERENCES projects (id))''')
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        # Добавляем новые колонки в shop_promocodes
+        try:
+            c.execute("ALTER TABLE shop_promocodes ADD COLUMN project_id INTEGER DEFAULT NULL")
+            print("✅ Добавлена колонка project_id в shop_promocodes")
+        except sqlite3.OperationalError:
+            pass
         
         # Таблица проектов
         c.execute('''CREATE TABLE IF NOT EXISTS projects
@@ -212,12 +243,17 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS jackpot_promocodes
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       promo_code TEXT,
-                      project_id INTEGER DEFAULT NULL,
                       is_used BOOLEAN DEFAULT 0,
                       winner_id INTEGER DEFAULT NULL,
                       won_at TIMESTAMP DEFAULT NULL,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (project_id) REFERENCES projects (id))''')
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        # Добавляем новые колонки в jackpot_promocodes
+        try:
+            c.execute("ALTER TABLE jackpot_promocodes ADD COLUMN project_id INTEGER DEFAULT NULL")
+            print("✅ Добавлена колонка project_id в jackpot_promocodes")
+        except sqlite3.OperationalError:
+            pass
         
         # Таблица уведомлений для админов
         c.execute('''CREATE TABLE IF NOT EXISTS admin_notifications
@@ -229,7 +265,15 @@ def init_db():
                       is_read BOOLEAN DEFAULT 0,
                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         
-        # Добавляем начальные данные
+        # Таблица настроек Mines
+        c.execute('''CREATE TABLE IF NOT EXISTS mines_settings
+                     (id INTEGER PRIMARY KEY CHECK (id=1),
+                      default_mines INTEGER DEFAULT 3)''')
+        
+        # Добавляем запись в mines_settings, если её нет
+        c.execute("INSERT OR IGNORE INTO mines_settings (id, default_mines) VALUES (1, 3)")
+        
+        # Добавляем начальные данные, только если таблицы пустые
         c.execute("SELECT COUNT(*) as count FROM tasks")
         if c.fetchone()['count'] == 0:
             initial_tasks = [
@@ -238,6 +282,7 @@ def init_db():
                 ("Посетить сайт партнера", "Перейдите на сайт нашего партнера", 1, 0, "website", "https://example.com"),
             ]
             c.executemany("INSERT INTO tasks (task_name, task_description, reward_spins, reward_points, task_type, task_data) VALUES (?,?,?,?,?,?)", initial_tasks)
+            print("✅ Добавлены начальные задания")
         
         c.execute("SELECT COUNT(*) as count FROM projects")
         if c.fetchone()['count'] == 0:
@@ -247,6 +292,7 @@ def init_db():
                 ("Joy Casino", "https://example.com/joy", "JOYSPIN"),
             ]
             c.executemany("INSERT INTO projects (title, url, promo_code) VALUES (?,?,?)", initial_projects)
+            print("✅ Добавлены начальные проекты")
         
         c.execute("SELECT COUNT(*) as count FROM wheel_prizes")
         if c.fetchone()['count'] == 0:
@@ -259,10 +305,10 @@ def init_db():
                 ("Пусто", "empty", 0, 25),
             ]
             c.executemany("INSERT INTO wheel_prizes (name, type, value, probability) VALUES (?,?,?,?)", initial_prizes)
+            print("✅ Добавлены начальные призы для колеса")
         
         c.execute("SELECT COUNT(*) as count FROM jackpot_promocodes")
         if c.fetchone()['count'] == 0:
-            # Проверяем, есть ли проекты для привязки
             c.execute("SELECT id FROM projects LIMIT 1")
             project = c.fetchone()
             project_id = project['id'] if project else None
@@ -275,9 +321,10 @@ def init_db():
                 ("LUCKY888", project_id)
             ]
             c.executemany("INSERT INTO jackpot_promocodes (promo_code, project_id) VALUES (?,?)", jackpot_promos)
+            print("✅ Добавлены начальные промокоды для джекпота")
         
         conn.commit()
-        print("✅ База данных инициализирована")
+        print("✅ База данных инициализирована (данные сохранены)")
         
     except Exception as e:
         print(f"❌ Ошибка при инициализации БД: {e}")
@@ -291,15 +338,31 @@ def migrate_db():
         conn = get_db()
         c = conn.cursor()
         
-        # Проверяем и добавляем колонку project_id в таблицу jackpot_promocodes
-        c.execute("PRAGMA table_info(jackpot_promocodes)")
+        # Проверяем и добавляем колонки в users
+        c.execute("PRAGMA table_info(users)")
         columns = [col['name'] for col in c.fetchall()]
         
-        if 'project_id' not in columns:
-            c.execute("ALTER TABLE jackpot_promocodes ADD COLUMN project_id INTEGER DEFAULT NULL")
-            print("✅ Добавлена колонка project_id в jackpot_promocodes")
+        if 'total_spins' not in columns:
+            c.execute("ALTER TABLE users ADD COLUMN total_spins INTEGER DEFAULT 0")
+            print("✅ Добавлена колонка total_spins")
         
-        # Проверяем и добавляем колонку project_id в таблицу shop_promocodes
+        if 'total_wins' not in columns:
+            c.execute("ALTER TABLE users ADD COLUMN total_wins INTEGER DEFAULT 0")
+            print("✅ Добавлена колонка total_wins")
+        
+        if 'last_daily_bonus' not in columns:
+            c.execute("ALTER TABLE users ADD COLUMN last_daily_bonus DATE DEFAULT NULL")
+            print("✅ Добавлена колонка last_daily_bonus")
+        
+        if 'daily_bonus_streak' not in columns:
+            c.execute("ALTER TABLE users ADD COLUMN daily_bonus_streak INTEGER DEFAULT 0")
+            print("✅ Добавлена колонка daily_bonus_streak")
+        
+        if 'last_free_spin' not in columns:
+            c.execute("ALTER TABLE users ADD COLUMN last_free_spin DATE DEFAULT NULL")
+            print("✅ Добавлена колонка last_free_spin")
+        
+        # Проверяем shop_promocodes
         c.execute("PRAGMA table_info(shop_promocodes)")
         columns = [col['name'] for col in c.fetchall()]
         
@@ -307,27 +370,19 @@ def migrate_db():
             c.execute("ALTER TABLE shop_promocodes ADD COLUMN project_id INTEGER DEFAULT NULL")
             print("✅ Добавлена колонка project_id в shop_promocodes")
         
-        # Проверяем и добавляем колонки для бонусов в таблицу users
-        c.execute("PRAGMA table_info(users)")
+        # Проверяем jackpot_promocodes
+        c.execute("PRAGMA table_info(jackpot_promocodes)")
         columns = [col['name'] for col in c.fetchall()]
         
-        if 'last_daily_bonus' not in columns:
-            c.execute("ALTER TABLE users ADD COLUMN last_daily_bonus DATE DEFAULT NULL")
-            print("✅ Добавлена колонка last_daily_bonus в users")
-        
-        if 'daily_bonus_streak' not in columns:
-            c.execute("ALTER TABLE users ADD COLUMN daily_bonus_streak INTEGER DEFAULT 0")
-            print("✅ Добавлена колонка daily_bonus_streak в users")
-        
-        if 'last_free_spin' not in columns:
-            c.execute("ALTER TABLE users ADD COLUMN last_free_spin DATE DEFAULT NULL")
-            print("✅ Добавлена колонка last_free_spin в users")
+        if 'project_id' not in columns:
+            c.execute("ALTER TABLE jackpot_promocodes ADD COLUMN project_id INTEGER DEFAULT NULL")
+            print("✅ Добавлена колонка project_id в jackpot_promocodes")
         
         conn.commit()
         print("✅ Миграция базы данных завершена")
         
     except Exception as e:
-        print(f"❌ Ошибка при миграции БД: {e}")
+        print(f"❌ Ошибка при миграции: {e}")
     finally:
         if conn:
             conn.close()
@@ -686,7 +741,10 @@ def get_wheel_prizes() -> List:
         conn = get_db()
         c = conn.cursor()
         c.execute("SELECT * FROM wheel_prizes WHERE is_active = 1 ORDER BY id")
-        return [dict(row) for row in c.fetchall()]
+        results = c.fetchall()
+        if results:
+            return [dict(row) for row in results]
+        return []
     finally:
         if conn:
             conn.close()
@@ -765,11 +823,11 @@ def delete_wheel_prize(prize_id: int):
             conn.close()
 
 def spin_wheel() -> dict:
-    """Вращение колеса с учетом вероятностей (без отображения шансов)"""
+    """Вращение колеса с учетом вероятностей"""
     prizes = get_wheel_prizes()
     
     if not prizes:
-        return {"name": "Пусто", "type": "empty", "value": 0, "probability": 100}
+        return {"name": "Пусто", "type": "empty", "value": 0}
     
     total_probability = sum(prize['probability'] for prize in prizes)
     
@@ -4251,47 +4309,12 @@ async def handle_unknown_callback(callback: CallbackQuery):
     """Обработчик неизвестных callback запросов"""
     await callback.answer("Эта кнопка больше не работает!", show_alert=True)
 
-# 5. В САМОМ КОНЦЕ функция main()
+# ==================== ЗАПУСК ====================
+
 async def main():
-    init_db()
-    
-    # ВРЕМЕННО: принудительное обновление структуры БД
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        
-        # Создаем таблицу для Mines, если её нет
-        c.execute('''CREATE TABLE IF NOT EXISTS mines_settings
-                     (id INTEGER PRIMARY KEY CHECK (id=1),
-                      default_mines INTEGER DEFAULT 3)''')
-        
-        # Добавляем запись по умолчанию
-        c.execute("INSERT OR IGNORE INTO mines_settings (id, default_mines) VALUES (1, 3)")
-        
-        # Проверяем и добавляем колонки для бонусов, если их нет
-        c.execute("PRAGMA table_info(users)")
-        columns = [col['name'] for col in c.fetchall()]
-        
-        if 'last_daily_bonus' not in columns:
-            c.execute("ALTER TABLE users ADD COLUMN last_daily_bonus DATE DEFAULT NULL")
-            print("✅ Добавлена колонка last_daily_bonus")
-        
-        if 'daily_bonus_streak' not in columns:
-            c.execute("ALTER TABLE users ADD COLUMN daily_bonus_streak INTEGER DEFAULT 0")
-            print("✅ Добавлена колонка daily_bonus_streak")
-        
-        if 'last_free_spin' not in columns:
-            c.execute("ALTER TABLE users ADD COLUMN last_free_spin DATE DEFAULT NULL")
-            print("✅ Добавлена колонка last_free_spin")
-        
-        conn.commit()
-        conn.close()
-        print("✅ База данных обновлена")
-    except Exception as e:
-        print(f"❌ Ошибка обновления БД: {e}")
-    
+    init_db()  # Создает таблицы, если их нет
+    migrate_db()  # Добавляет недостающие колонки
     print("✅ Бот запущен!")
-    await dp.start_polling(bot)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
