@@ -2,12 +2,13 @@ import asyncio
 import logging
 import sqlite3
 import random
+import math
 import time
 import functools  # <- Этого не хватает!
 import json
 import os
 from datetime import datetime, timedelta
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 from contextlib import contextmanager
 
 from aiogram import Bot, Dispatcher, types, F
@@ -96,7 +97,14 @@ class AdminStates(StatesGroup):
     waiting_for_mailing = State()
     waiting_for_mailing_confirm = State()
     waiting_for_jackpot_promo = State()
-
+    waiting_for_mines_count = State()
+    
+# ==================== СОСТОЯНИЯ ДЛЯ ИГРЫ MINES ====================
+class MinesStates(StatesGroup):
+    waiting_for_bet = State()
+    waiting_for_mines_count = State()
+    playing = State()
+    
 # ==================== РАБОТА С БАЗОЙ ДАННЫХ ====================
 
 def get_db():
@@ -1323,7 +1331,143 @@ def use_jackpot_promocode(promo_id: int, user_id: int) -> bool:
     finally:
         if conn:
             conn.close()
+# ==================== ФУНКЦИИ ДЛЯ НАСТРОЕК MINES ====================
 
+@retry_on_locked()
+def get_mines_settings():
+    """Получить настройки игры Mines"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Создаем таблицу для настроек, если её нет
+        c.execute('''CREATE TABLE IF NOT EXISTS mines_settings
+                     (id INTEGER PRIMARY KEY CHECK (id=1),
+                      default_mines INTEGER DEFAULT 3)''')
+        
+        # Добавляем запись по умолчанию, если её нет
+        c.execute("SELECT * FROM mines_settings WHERE id = 1")
+        if not c.fetchone():
+            c.execute("INSERT INTO mines_settings (id, default_mines) VALUES (1, ?)", (3,))
+            conn.commit()
+        
+        c.execute("SELECT default_mines FROM mines_settings WHERE id = 1")
+        row = c.fetchone()
+        return row['default_mines'] if row else 3
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def update_mines_settings(default_mines: int):
+    """Обновить настройки игры Mines"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE mines_settings SET default_mines = ? WHERE id = 1", (default_mines,))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении настроек Mines: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+# ==================== КОНСТАНТЫ ДЛЯ ИГРЫ MINES ====================
+
+MINES_FIELD_SIZE = 5
+MINES_MAX_BET = 1000
+
+# Фиксированные коэффициенты для разного количества мин
+MINES_MULTIPLIERS = {
+    2: {
+        1: 1.03, 2: 1.12, 3: 1.23, 4: 1.35, 5: 1.49,
+        6: 1.64, 7: 1.80, 8: 1.98, 9: 2.18, 10: 2.40,
+        11: 2.64, 12: 2.90, 13: 3.19, 14: 3.51, 15: 3.86,
+        16: 4.25, 17: 4.68, 18: 5.15, 19: 5.67, 20: 6.24,
+        21: 6.86, 22: 7.55, 23: 285.0
+    },
+    3: {
+        1: 1.07, 2: 1.23, 3: 1.41, 4: 1.62, 5: 1.86,
+        6: 2.14, 7: 2.46, 8: 2.83, 9: 3.25, 10: 3.74,
+        11: 4.30, 12: 4.95, 13: 5.69, 14: 6.54, 15: 7.52,
+        16: 8.65, 17: 9.95, 18: 11.44, 19: 13.16, 20: 15.13,
+        21: 546.25, 22: 2185.0
+    },
+    5: {
+        1: 1.18, 2: 1.50, 3: 1.91, 4: 2.43, 5: 3.09,
+        6: 3.93, 7: 5.00, 8: 6.36, 9: 8.09, 10: 10.29,
+        11: 13.09, 12: 16.65, 13: 21.18, 14: 26.94, 15: 34.27,
+        16: 43.59, 17: 55.45, 18: 70.53, 19: 8412.24, 20: 50473.49
+    },
+    10: {
+        1: 1.58, 2: 2.71, 3: 4.80, 4: 8.50, 5: 15.05,
+        6: 26.64, 7: 47.15, 8: 83.46, 9: 147.72, 10: 261.46,
+        11: 462.78, 12: 819.12, 13: 1449.84, 14: 282302.0, 15: 3105322.0
+    },
+    24: {
+        1: 23.75, 2: 564.06, 3: 13396.43, 4: 318165.21, 5: 7556423.74
+    }
+}
+
+# Максимальное количество шагов для каждого уровня мин
+MAX_STEPS = {
+    2: 23,
+    3: 22,
+    5: 20,
+    10: 15,
+    24: 5
+}
+
+# Доступные варианты количества мин для выбора игроком
+AVAILABLE_MINES_COUNTS = [2, 3, 5, 10, 24]
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ MINES ====================
+
+def create_mines_field(mines_count: int) -> Tuple[List[str], List[int]]:
+    """Создание игрового поля с заданным количеством мин"""
+    field = ['⬜'] * (MINES_FIELD_SIZE * MINES_FIELD_SIZE)
+    mine_positions = random.sample(range(len(field)), mines_count)
+    return field, mine_positions
+
+def format_mines_field(field: List[str], opened: List[int] = None, mines_count: int = None) -> str:
+    """Форматирование поля для отображения"""
+    if opened is None:
+        opened = []
+    
+    result = "💣 MINES 💣\n\n"
+    if mines_count:
+        result += f"💣 Мин на поле: {mines_count}\n"
+    result += "\n"
+    
+    for i in range(0, len(field), MINES_FIELD_SIZE):
+        row = ""
+        for j in range(MINES_FIELD_SIZE):
+            idx = i + j
+            if idx in opened:
+                row += "✅ "
+            else:
+                row += "⬜ "
+        result += row + "\n"
+    
+    return result
+
+def get_multiplier(mines_count: int, step: int) -> float:
+    """Получить множитель для конкретного шага"""
+    if mines_count in MINES_MULTIPLIERS and step in MINES_MULTIPLIERS[mines_count]:
+        return MINES_MULTIPLIERS[mines_count][step]
+    return 1.0
+
+def get_max_steps(mines_count: int) -> int:
+    """Получить максимальное количество шагов для данного количества мин"""
+    return MAX_STEPS.get(mines_count, 0)
+
+def calculate_potential_win(bet: int, mines_count: int, current_step: int) -> int:
+    """Рассчитать потенциальный выигрыш на следующем шаге"""
+    next_step = current_step + 1
+    multiplier = get_multiplier(mines_count, next_step)
+    return int(bet * multiplier)
 # ==================== ФУНКЦИИ СТАТИСТИКИ ====================
 
 @retry_on_locked()
@@ -1377,13 +1521,13 @@ def get_main_keyboard(user_id: int = None):
     """Главная клавиатура"""
     keyboard = [
         [KeyboardButton(text="📂 ПРОЕКТЫ"), KeyboardButton(text="📋 ЗАДАНИЯ")],
-        [KeyboardButton(text="👥 РЕФЕРАЛЫ"), KeyboardButton(text="🎡 КОЛЕСО ФОРТУНЫ")],
+        [KeyboardButton(text="👥 РЕФЕРАЛЫ"), KeyboardButton(text="🎡 КОЛЕСО")],
         [KeyboardButton(text="🏪 МАГАЗИН"), KeyboardButton(text="👤 ПРОФИЛЬ")],
-        [KeyboardButton(text="🎁 БОНУСЫ")],
+        [KeyboardButton(text="🎁 БОНУСЫ"), KeyboardButton(text="💣 MINES")],  # Добавлена кнопка MINES
     ]
     
     if user_id and user_id in ADMIN_IDS:
-        keyboard.append([KeyboardButton(text="⚙️ АДМИН ПАНЕЛЬ")])
+        keyboard.append([KeyboardButton(text="⚙️ АДМИН")])
     
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -2048,6 +2192,7 @@ async def show_admin_menu(message: Message):
         [InlineKeyboardButton(text="🎡 Управление колесом", callback_data="admin_wheel")],
         [InlineKeyboardButton(text="📋 Управление заданиями", callback_data="admin_tasks")],
         [InlineKeyboardButton(text="🎰 Управление джекпотом", callback_data="admin_jackpot")],
+        [InlineKeyboardButton(text="💣 Настройка Mines", callback_data="admin_mines")],  # Новая кнопка
         [InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_mailing")],
         [InlineKeyboardButton(text="💰 Начислить бонусы", callback_data="admin_add_bonus")],
     ])
@@ -3555,7 +3700,354 @@ async def jackpot_history(callback: CallbackQuery):
     ])
     
     await safe_edit_message(callback.message, text, reply_markup=keyboard)
+# ==================== ИГРА MINES ====================
 
+@dp.message(F.text == "💣 MINES")
+async def mines_start(message: Message, state: FSMContext):
+    """Начало игры Mines - выбор количества мин"""
+    user_id = message.from_user.id
+    user_data = get_user_data(user_id)
+    
+    if not user_data:
+        await message.answer("❌ Сначала запустите бота через /start")
+        return
+    
+    points = user_data['points']
+    
+    if points <= 0:
+        await message.answer(
+            "❌ У вас нет баллов для игры!\n"
+            "Выполняйте задания или крутите колесо, чтобы заработать баллы.",
+            reply_markup=get_main_keyboard(user_id)
+        )
+        return
+    
+    # Показываем доступные варианты количества мин
+    text = (
+        f"💣 ДОБРО ПОЖАЛОВАТЬ В MINES!\n\n"
+        f"💰 Ваш баланс: {points} баллов\n"
+        f"🎯 Максимальная ставка: {MINES_MAX_BET} баллов\n\n"
+        f"Выберите количество мин на поле:\n"
+    )
+    
+    keyboard = []
+    for mines_count in AVAILABLE_MINES_COUNTS:
+        max_steps = get_max_steps(mines_count)
+        final_mult = get_multiplier(mines_count, max_steps)
+        text += f"• {mines_count} мин - макс. множитель x{final_mult:.2f}\n"
+        keyboard.append([KeyboardButton(text=f"{mines_count} мин")])
+    
+    keyboard.append([KeyboardButton(text="❌ Отмена")])
+    
+    await message.answer(
+        text,
+        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    )
+    await state.set_state(MinesStates.waiting_for_mines_count)
+
+@dp.message(MinesStates.waiting_for_mines_count)
+async def mines_select_count(message: Message, state: FSMContext):
+    """Выбор количества мин"""
+    user_id = message.from_user.id
+    
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Игра отменена", reply_markup=get_main_keyboard(user_id))
+        return
+    
+    try:
+        mines_count = int(message.text.replace(" мин", ""))
+    except:
+        await message.answer("❌ Пожалуйста, выберите количество мин из меню")
+        return
+    
+    if mines_count not in AVAILABLE_MINES_COUNTS:
+        await message.answer("❌ Недоступное количество мин")
+        return
+    
+    await state.update_data(mines_count=mines_count)
+    
+    user_data = get_user_data(user_id)
+    points = user_data['points']
+    
+    await message.answer(
+        f"💣 Выбрано мин: {mines_count}\n"
+        f"💰 Ваш баланс: {points} баллов\n\n"
+        f"Введите сумму ставки (от 1 до {min(MINES_MAX_BET, points)}):",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="❌ Отмена")]],
+            resize_keyboard=True
+        )
+    )
+    await state.set_state(MinesStates.waiting_for_bet)
+
+@dp.message(MinesStates.waiting_for_bet)
+async def mines_process_bet(message: Message, state: FSMContext):
+    """Обработка ставки"""
+    user_id = message.from_user.id
+    
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Игра отменена", reply_markup=get_main_keyboard(user_id))
+        return
+    
+    try:
+        bet = int(message.text)
+    except ValueError:
+        await message.answer("❌ Введите число!")
+        return
+    
+    user_data = get_user_data(user_id)
+    points = user_data['points']
+    
+    if bet < 1:
+        await message.answer("❌ Минимальная ставка - 1 балл")
+        return
+    
+    if bet > MINES_MAX_BET:
+        await message.answer(f"❌ Максимальная ставка - {MINES_MAX_BET} баллов")
+        return
+    
+    if bet > points:
+        await message.answer(f"❌ У вас только {points} баллов!")
+        return
+    
+    data = await state.get_data()
+    mines_count = data['mines_count']
+    
+    field, mine_positions = create_mines_field(mines_count)
+    
+    await state.update_data(
+        bet=bet,
+        field=field,
+        mine_positions=mine_positions,
+        mines_count=mines_count,
+        opened=[],
+        current_step=0
+    )
+    
+    update_user_points(user_id, -bet)
+    
+    text = format_mines_field(field, [], mines_count)
+    text += f"\n💰 Ставка: {bet} баллов\n"
+    text += f"📈 Множитель: x1.0\n"
+    text += f"💎 Потенциальный выигрыш: {bet} баллов\n\n"
+    text += "Выберите клетку (1-25) или заберите выигрыш:"
+    
+    # Создаем клавиатуру с клетками
+    keyboard = []
+    row = []
+    for i in range(1, 26):
+        row.append(KeyboardButton(text=str(i)))
+        if i % 5 == 0:
+            keyboard.append(row)
+            row = []
+    
+    keyboard.append([KeyboardButton(text="💰 Забрать выигрыш"), KeyboardButton(text="❌ Выйти")])
+    
+    await message.answer(
+        text,
+        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    )
+    await state.set_state(MinesStates.playing)
+
+@dp.message(MinesStates.playing)
+async def mines_game(message: Message, state: FSMContext):
+    """Игровой процесс Mines"""
+    user_id = message.from_user.id
+    
+    if message.text == "❌ Выйти":
+        await state.clear()
+        await message.answer("Игра завершена", reply_markup=get_main_keyboard(user_id))
+        return
+    
+    data = await state.get_data()
+    bet = data['bet']
+    field = data['field']
+    mine_positions = data['mine_positions']
+    opened = data['opened']
+    mines_count = data['mines_count']
+    current_step = data['current_step']
+    
+    if message.text == "💰 Забрать выигрыш":
+        if current_step > 0:
+            multiplier = get_multiplier(mines_count, current_step)
+            win = int(bet * multiplier)
+        else:
+            multiplier = 1.0
+            win = bet
+        
+        update_user_points(user_id, win)
+        
+        field_display = list(field)
+        for pos in mine_positions:
+            if pos not in opened:
+                field_display[pos] = '💣'
+        
+        field_text = ""
+        for i in range(0, len(field_display), MINES_FIELD_SIZE):
+            row = ""
+            for j in range(MINES_FIELD_SIZE):
+                idx = i + j
+                if idx in opened:
+                    row += "✅ "
+                elif idx in mine_positions:
+                    row += "💣 "
+                else:
+                    row += "⬜ "
+            field_text += row + "\n"
+        
+        text = (
+            f"✅ ВЫ ЗАБРАЛИ ВЫИГРЫШ!\n\n"
+            f"{field_text}\n"
+            f"📊 Открыто клеток: {current_step}\n"
+            f"📈 Множитель: x{multiplier:.2f}\n"
+            f"💰 Выигрыш: {win} баллов\n\n"
+            f"💣 Мины были на позициях: {', '.join([str(p+1) for p in mine_positions])}\n"
+            f"💰 Новый баланс: {get_user_points(user_id)} баллов"
+        )
+        
+        await state.clear()
+        await message.answer(text, reply_markup=get_main_keyboard(user_id))
+        return
+    
+    try:
+        cell = int(message.text) - 1
+    except ValueError:
+        await message.answer("❌ Выберите клетку от 1 до 25!")
+        return
+    
+    if cell < 0 or cell >= 25:
+        await message.answer("❌ Выберите клетку от 1 до 25!")
+        return
+    
+    if cell in opened:
+        await message.answer("❌ Эта клетка уже открыта!")
+        return
+    
+    if cell in mine_positions:
+        field_display = list(field)
+        for pos in mine_positions:
+            field_display[pos] = '💣'
+        
+        field_text = ""
+        for i in range(0, len(field_display), MINES_FIELD_SIZE):
+            row = ""
+            for j in range(MINES_FIELD_SIZE):
+                idx = i + j
+                if idx in opened:
+                    row += "✅ "
+                elif idx in mine_positions:
+                    row += "💣 "
+                else:
+                    row += "⬜ "
+            field_text += row + "\n"
+        
+        text = (
+            f"💥 БАБАХ! Вы наткнулись на мину!\n\n"
+            f"{field_text}\n"
+            f"💰 Потеряно: {bet} баллов\n"
+            f"💔 Новый баланс: {get_user_points(user_id)} баллов"
+        )
+        
+        await state.clear()
+        await message.answer(text, reply_markup=get_main_keyboard(user_id))
+        return
+    
+    opened.append(cell)
+    current_step += 1
+    
+    multiplier = get_multiplier(mines_count, current_step)
+    potential_next = calculate_potential_win(bet, mines_count, current_step)
+    
+    await state.update_data(opened=opened, current_step=current_step)
+    
+    text = format_mines_field(field, opened, mines_count)
+    text += f"\n💰 Ставка: {bet} баллов\n"
+    text += f"📈 Текущий множитель: x{multiplier:.2f}\n"
+    text += f"💎 Потенциальный выигрыш: {potential_next} баллов\n"
+    text += f"✅ Открыто безопасных клеток: {current_step}\n"
+    
+    if current_step == get_max_steps(mines_count):
+        text += "🎉 ДЖЕКПОТ! Вы открыли все безопасные клетки!\n"
+        text += "Нажмите 'Забрать выигрыш' для получения джекпота!\n\n"
+    else:
+        remaining = get_max_steps(mines_count) - current_step
+        text += f"💣 Осталось безопасных клеток: {remaining}\n\n"
+    
+    text += "Выберите клетку (1-25) или заберите выигрыш:"
+    
+    # Создаем клавиатуру
+    keyboard = []
+    row = []
+    for i in range(1, 26):
+        if i-1 in opened:
+            row.append(KeyboardButton(text="✅"))
+        else:
+            row.append(KeyboardButton(text=str(i)))
+        if i % 5 == 0:
+            keyboard.append(row)
+            row = []
+    
+    keyboard.append([KeyboardButton(text="💰 Забрать выигрыш"), KeyboardButton(text="❌ Выйти")])
+    
+    await message.answer(
+        text,
+        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    )
+
+@dp.callback_query(F.data == "admin_mines")
+async def admin_mines_settings(callback: CallbackQuery):
+    """Настройка игры Mines"""
+    await callback.answer()
+    
+    current_default = get_mines_settings()
+    
+    text = (
+        f"💣 НАСТРОЙКА ИГРЫ MINES\n\n"
+        f"Доступные уровни сложности:\n"
+    )
+    
+    for mines_count in AVAILABLE_MINES_COUNTS:
+        max_steps = get_max_steps(mines_count)
+        final_mult = get_multiplier(mines_count, max_steps)
+        text += f"• {mines_count} мин - {max_steps} шагов, макс. x{final_mult:.2f}\n"
+    
+    text += f"\nТекущее значение по умолчанию: {current_default} мин\n\n"
+    text += "Введите новое значение по умолчанию (2, 3, 5, 10, 24):"
+    
+    await callback.message.edit_text(text)
+    await AdminStates.waiting_for_mines_count.set()
+
+@dp.message(AdminStates.waiting_for_mines_count)
+async def admin_mines_set_default(message: Message, state: FSMContext):
+    """Установка значения по умолчанию"""
+    try:
+        default_mines = int(message.text)
+    except ValueError:
+        await message.answer("❌ Введите число!")
+        return
+    
+    if default_mines not in AVAILABLE_MINES_COUNTS:
+        await message.answer("❌ Доступные значения: 2, 3, 5, 10, 24")
+        return
+    
+    if update_mines_settings(default_mines):
+        await message.answer(f"✅ Значение по умолчанию изменено на {default_mines} мин!")
+    else:
+        await message.answer("❌ Ошибка при сохранении настроек!")
+    
+    await state.clear()
+    await show_admin_menu(message)
+
+# Добавляем обработчик для отмены
+@dp.message(F.text == "❌ Отмена")
+async def cancel_game(message: Message, state: FSMContext):
+    """Отмена любой игры или действия"""
+    current_state = await state.get_state()
+    if current_state is not None:
+        await state.clear()
+    await message.answer("Действие отменено", reply_markup=get_main_keyboard(message.from_user.id))
 # ==================== РАССЫЛКА ====================
 
 @dp.callback_query(F.data == "admin_mailing")
@@ -3766,6 +4258,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
