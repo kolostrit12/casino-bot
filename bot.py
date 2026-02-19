@@ -4311,25 +4311,6 @@ async def back_to_admin_handler(callback: CallbackQuery):
     await show_admin_menu(callback.message)
 
 # ==================== ОБРАБОТЧИКИ ДЛЯ НЕИЗВЕСТНЫХ КОМАНД ====================
-
-@dp.message()
-async def handle_unknown(message: Message):
-    """Обработчик неизвестных сообщений"""
-    user_id = message.from_user.id
-    await message.answer(
-        "❓ Я не понимаю эту команду.\n"
-        "Используй кнопки меню для навигации!",
-        reply_markup=get_main_keyboard(user_id)
-    )
-
-@dp.callback_query()
-async def handle_unknown_callback(callback: CallbackQuery):
-    """Обработчик неизвестных callback запросов"""
-    await callback.answer("Эта кнопка больше не работает!", show_alert=True)
-
-# ==================== ЗАПУСК ====================
-# ==================== КОМАНДА ДЛЯ БЭКАПА (ТОЛЬКО ДЛЯ АДМИНОВ) ====================
-
 @dp.message(Command("backup"))
 async def cmd_backup(message: Message):
     """Команда для скачивания резервной копии БД (только для админов)"""
@@ -4367,6 +4348,22 @@ async def cmd_backup(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка при создании бэкапа: {e}")
 
+@dp.message()
+async def handle_unknown(message: Message):
+    """Обработчик неизвестных сообщений"""
+    user_id = message.from_user.id
+    await message.answer(
+        "❓ Я не понимаю эту команду.\n"
+        "Используй кнопки меню для навигации!",
+        reply_markup=get_main_keyboard(user_id)
+    )
+
+@dp.callback_query()
+async def handle_unknown_callback(callback: CallbackQuery):
+    """Обработчик неизвестных callback запросов"""
+    await callback.answer("Эта кнопка больше не работает!", show_alert=True)
+
+
 async def main():
     init_db()  # Создает таблицы, если их нет
     migrate_db()  # Добавляет недостающие колонки
@@ -4375,6 +4372,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
