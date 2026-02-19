@@ -1481,7 +1481,7 @@ MINES_MULTIPLIERS = {
         11: 462.78, 12: 819.12, 13: 1449.84, 14: 282302.0, 15: 3105322.0
     },
     24: {
-        1: 23.75, 2: 564.06, 3: 13396.43, 4: 318165.21, 5: 7556423.74
+        1: 23.75  # Только один шаг с коэффициентом 23.75
     }
 }
 
@@ -1491,7 +1491,7 @@ MAX_STEPS = {
     3: 22,
     5: 20,
     10: 15,
-    24: 5
+    24: 1  # Исправлено: только 1 шаг для 24 мин
 }
 
 # Доступные варианты количества мин для выбора игроком
@@ -1539,6 +1539,12 @@ def get_max_steps(mines_count: int) -> int:
 def calculate_potential_win(bet: int, mines_count: int, current_step: int) -> int:
     """Рассчитать потенциальный выигрыш на следующем шаге"""
     next_step = current_step + 1
+    max_steps = get_max_steps(mines_count)
+    
+    # Если следующий шаг больше максимального, возвращаем 0
+    if next_step > max_steps:
+        return 0
+        
     multiplier = get_multiplier(mines_count, next_step)
     return int(bet * multiplier)
 
@@ -3798,7 +3804,7 @@ async def mines_start(message: Message, state: FSMContext):
         )
         return
     
-    # Показываем доступные варианты количества мин
+    # Показываем доступные варианты количества мин (БЕЗ КОЭФФИЦИЕНТОВ)
     text = (
         f"💣 ДОБРО ПОЖАЛОВАТЬ В MINES!\n\n"
         f"💰 Ваш баланс: {points} баллов\n"
@@ -3806,11 +3812,10 @@ async def mines_start(message: Message, state: FSMContext):
         f"Выберите количество мин на поле:\n"
     )
     
+    # Просто список мин без коэффициентов
     keyboard = []
     for mines_count in AVAILABLE_MINES_COUNTS:
-        max_steps = get_max_steps(mines_count)
-        final_mult = get_multiplier(mines_count, max_steps)
-        text += f"• {mines_count} мин - макс. множитель x{final_mult:.2f}\n"
+        text += f"• {mines_count} мин\n"
         keyboard.append([KeyboardButton(text=f"{mines_count} мин")])
     
     keyboard.append([KeyboardButton(text="❌ Отмена")])
@@ -3944,6 +3949,7 @@ async def mines_game(message: Message, state: FSMContext):
     opened = data['opened']
     mines_count = data['mines_count']
     current_step = data['current_step']
+    max_steps = get_max_steps(mines_count)
     
     if message.text == "💰 Забрать выигрыш":
         if current_step > 0:
@@ -3955,11 +3961,13 @@ async def mines_game(message: Message, state: FSMContext):
         
         update_user_points(user_id, win)
         
+        # Открываем все мины для наглядности
         field_display = list(field)
         for pos in mine_positions:
             if pos not in opened:
                 field_display[pos] = '💣'
         
+        # Формируем отображение поля с минами
         field_text = ""
         for i in range(0, len(field_display), MINES_FIELD_SIZE):
             row = ""
@@ -4001,11 +4009,14 @@ async def mines_game(message: Message, state: FSMContext):
         await message.answer("❌ Эта клетка уже открыта!")
         return
     
+    # Проверяем, не мина ли это
     if cell in mine_positions:
+        # Проигрыш - показываем все мины
         field_display = list(field)
         for pos in mine_positions:
             field_display[pos] = '💣'
         
+        # Формируем отображение поля с минами
         field_text = ""
         for i in range(0, len(field_display), MINES_FIELD_SIZE):
             row = ""
@@ -4030,25 +4041,29 @@ async def mines_game(message: Message, state: FSMContext):
         await message.answer(text, reply_markup=get_main_keyboard(user_id))
         return
     
+    # Открываем клетку
     opened.append(cell)
     current_step += 1
     
+    # Получаем множитель для текущего шага
     multiplier = get_multiplier(mines_count, current_step)
-    potential_next = calculate_potential_win(bet, mines_count, current_step)
     
+    # Обновляем данные
     await state.update_data(opened=opened, current_step=current_step)
     
+    # Показываем обновленное поле
     text = format_mines_field(field, opened, mines_count)
     text += f"\n💰 Ставка: {bet} баллов\n"
     text += f"📈 Текущий множитель: x{multiplier:.2f}\n"
-    text += f"💎 Потенциальный выигрыш: {potential_next} баллов\n"
-    text += f"✅ Открыто безопасных клеток: {current_step}\n"
     
-    if current_step == get_max_steps(mines_count):
+    if current_step == max_steps:
         text += "🎉 ДЖЕКПОТ! Вы открыли все безопасные клетки!\n"
-        text += "Нажмите 'Забрать выигрыш' для получения джекпота!\n\n"
+        text += "Нажмите 'Забрать выигрыш' для получения выигрыша!\n\n"
     else:
-        remaining = get_max_steps(mines_count) - current_step
+        remaining = max_steps - current_step
+        potential_next = calculate_potential_win(bet, mines_count, current_step)
+        text += f"💎 Потенциальный выигрыш на след. шаге: {potential_next} баллов\n"
+        text += f"✅ Открыто безопасных клеток: {current_step}\n"
         text += f"💣 Осталось безопасных клеток: {remaining}\n\n"
     
     text += "Выберите клетку (1-25) или заберите выигрыш:"
@@ -4372,6 +4387,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
