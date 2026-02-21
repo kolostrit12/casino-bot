@@ -1106,7 +1106,48 @@ def complete_task(user_id: int, task_id: int) -> bool:
             conn.close()
 
 # ==================== ФУНКЦИИ ДЛЯ МАГАЗИНА ====================
+@retry_on_locked()
+def update_shop_item(item_id: int, **kwargs):
+    """Обновить товар в магазине"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        allowed_fields = ['name', 'price', 'promo_code', 'project_id', 'is_used', 'buyer_id', 'bought_at']
+        updates = []
+        params = []
+        
+        for field, value in kwargs.items():
+            if field in allowed_fields:
+                updates.append(f"{field} = ?")
+                params.append(value)
+        
+        if not updates:
+            return False
+        
+        params.append(item_id)
+        c.execute(f"UPDATE shop_promocodes SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+        return c.rowcount > 0
+    finally:
+        if conn:
+            conn.close()
 
+@retry_on_locked()
+def delete_shop_item(item_id: int):
+    """Удалить товар из магазина"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM shop_promocodes WHERE id = ?", (item_id,))
+        conn.commit()
+        return c.rowcount > 0
+    finally:
+        if conn:
+            conn.close()
+            
 @retry_on_locked()
 def get_shop_items(include_used: bool = False) -> List:
     """Получить список товаров в магазине (группировка по названию)"""
@@ -3210,8 +3251,235 @@ async def admin_shop_menu(callback: CallbackQuery):
     keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin"))
     
     await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup())
+@dp.callback_query(F.data == "edit_shop_list")
+async def edit_shop_list(callback: CallbackQuery):
+    """Список всех экземпляров товаров для редактирования"""
+    await callback.answer()
+    
+    items = get_all_shop_items_detailed(include_used=True)
+    
+    if not items:
+        await safe_edit_message(callback.message, "🏪 В магазине нет товаров.")
+        return
+    
+    text = "📋 ВСЕ ЭКЗЕМПЛЯРЫ ТОВАРОВ\n\n"
+    
+    # Группируем по товарам для удобства
+    current_item = ""
+    for item in items:
+        item_key = f"{item['name']} - {item['price']}💰"
+        if item_key != current_item:
+            current_item = item_key
+            text += f"\n📦 <b>{item['name']}</b> - {item['price']}💰\n"
+        
+        status = "✅" if not item['is_used'] else "💰"
+        buyer_info = f" (куплен ID: {item['buyer_id']})" if item['buyer_id'] else ""
+        text += f"   {status} ID: {item['id']} - {item['promo_code']}{buyer_info}\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.row(InlineKeyboardButton(text="🔍 Поиск по ID", callback_data="search_shop_item"))
+    keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_shop"))
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup(), parse_mode='HTML')
 
+@dp.callback_query(F.data == "search_shop_item")
+async def search_shop_item_start(callback: CallbackQuery, state: FSMContext):
+    """Начало поиска товара по ID"""
+    await callback.answer()
+    await safe_edit_message(
+        callback.message,
+        "🔍 Введите ID товара для редактирования:"
+    )
+    await state.set_state("waiting_for_shop_item_id")
 
+@dp.message(F.text, StateFilter("waiting_for_shop_item_id"))
+async def search_shop_item_by_id(message: Message, state: FSMContext):
+    """Поиск товара по ID"""
+    try:
+        item_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введите число!")
+        await state.clear()
+        return
+    
+    item = get_shop_item_by_id(item_id)
+    
+    if not item:
+        await message.answer(f"❌ Товар с ID {item_id} не найден!")
+        await state.clear()
+        return
+    
+    # Показываем меню редактирования
+    await show_shop_item_edit_menu(message, item)
+    await state.clear()
+
+async def show_shop_item_edit_menu(message: Message, item: dict):
+    """Показать меню редактирования товара"""
+    status = "Доступен" if not item['is_used'] else "Продан"
+    buyer_info = f"\n👤 Покупатель: {item['buyer_id']}" if item['buyer_id'] else ""
+    time_info = f"\n⏰ Время покупки: {item['bought_at'][:16]}" if item['bought_at'] else ""
+    project_info = f"\n🏢 Проект: {item['project_title']}" if item.get('project_title') else ""
+    
+    text = (
+        f"📦 РЕДАКТИРОВАНИЕ ТОВАРА\n\n"
+        f"ID: {item['id']}\n"
+        f"Название: {item['name']}\n"
+        f"Цена: {item['price']}💰\n"
+        f"Промокод: {item['promo_code']}\n"
+        f"Статус: {status}{buyer_info}{time_info}{project_info}\n\n"
+        f"Выберите действие:"
+    )
+    
+    keyboard = InlineKeyboardBuilder()
+    
+    if not item['is_used']:
+        keyboard.row(InlineKeyboardButton(
+            text="✏️ Изменить название", 
+            callback_data=f"edit_shop_name_{item['id']}"
+        ))
+        keyboard.row(InlineKeyboardButton(
+            text="💰 Изменить цену", 
+            callback_data=f"edit_shop_price_{item['id']}"
+        ))
+        keyboard.row(InlineKeyboardButton(
+            text="🎫 Изменить промокод", 
+            callback_data=f"edit_shop_code_{item['id']}"
+        ))
+        if item.get('project_id'):
+            keyboard.row(InlineKeyboardButton(
+                text="🏢 Изменить проект", 
+                callback_data=f"edit_shop_project_{item['id']}"
+            ))
+    
+    keyboard.row(InlineKeyboardButton(
+        text="🗑 Удалить", 
+        callback_data=f"delete_shop_item_{item['id']}"
+    ))
+    keyboard.row(InlineKeyboardButton(
+        text="◀️ Назад к списку", 
+        callback_data="edit_shop_list"
+    ))
+    
+    await message.answer(text, reply_markup=keyboard.as_markup())
+@dp.callback_query(F.data.startswith("edit_shop_name_"))
+async def edit_shop_name_start(callback: CallbackQuery, state: FSMContext):
+    """Начало изменения названия товара"""
+    await callback.answer()
+    try:
+        item_id = int(callback.data.split("_")[3])
+        await state.update_data(item_id=item_id, edit_field="name")
+        await safe_edit_message(callback.message, "Введите новое название товара:")
+        await state.set_state(AdminStates.waiting_for_promo_edit)
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных товара")
+
+@dp.callback_query(F.data.startswith("edit_shop_price_"))
+async def edit_shop_price_start(callback: CallbackQuery, state: FSMContext):
+    """Начало изменения цены товара"""
+    await callback.answer()
+    try:
+        item_id = int(callback.data.split("_")[3])
+        await state.update_data(item_id=item_id, edit_field="price")
+        await safe_edit_message(callback.message, "Введите новую цену (только число):")
+        await state.set_state(AdminStates.waiting_for_promo_edit)
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных товара")
+
+@dp.callback_query(F.data.startswith("edit_shop_code_"))
+async def edit_shop_code_start(callback: CallbackQuery, state: FSMContext):
+    """Начало изменения промокода"""
+    await callback.answer()
+    try:
+        item_id = int(callback.data.split("_")[3])
+        await state.update_data(item_id=item_id, edit_field="code")
+        await safe_edit_message(callback.message, "Введите новый промокод:")
+        await state.set_state(AdminStates.waiting_for_promo_edit)
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных товара")
+
+@dp.callback_query(F.data.startswith("edit_shop_project_"))
+async def edit_shop_project_start(callback: CallbackQuery, state: FSMContext):
+    """Начало изменения проекта товара"""
+    await callback.answer()
+    try:
+        item_id = int(callback.data.split("_")[3])
+        
+        # Показываем список проектов
+        projects = get_projects()
+        if not projects:
+            await safe_edit_message(callback.message, "❌ Нет доступных проектов!")
+            return
+        
+        text = "Выберите проект:\n\n"
+        keyboard = InlineKeyboardBuilder()
+        
+        for proj in projects:
+            text += f"ID {proj['id']}: {proj['title']}\n"
+            keyboard.row(InlineKeyboardButton(
+                text=f"{proj['title']}",
+                callback_data=f"set_shop_project_{item_id}_{proj['id']}"
+            ))
+        
+        keyboard.row(InlineKeyboardButton(text="❌ Без проекта", callback_data=f"set_shop_project_{item_id}_0"))
+        
+        await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup())
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных товара")
+
+@dp.callback_query(F.data.startswith("set_shop_project_"))
+async def set_shop_project(callback: CallbackQuery):
+    """Установка проекта для товара"""
+    await callback.answer()
+    try:
+        parts = callback.data.split("_")
+        item_id = int(parts[3])
+        project_id = int(parts[4]) if parts[4] != "0" else None
+        
+        update_shop_item(item_id, project_id=project_id)
+        
+        project_name = "без проекта" if not project_id else f"ID {project_id}"
+        await safe_edit_message(callback.message, f"✅ Проект изменен на {project_name}")
+        
+        # Показываем обновленный товар
+        item = get_shop_item_by_id(item_id)
+        if item:
+            await show_shop_item_edit_menu(callback.message, item)
+        
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка при изменении проекта")
+
+@dp.message(AdminStates.waiting_for_promo_edit)
+async def edit_shop_item_finish(message: Message, state: FSMContext):
+    """Сохранение изменений товара"""
+    data = await state.get_data()
+    item_id = data['item_id']
+    edit_field = data['edit_field']
+    new_value = message.text.strip()
+    
+    update_data = {}
+    if edit_field == "name":
+        update_data['name'] = new_value
+    elif edit_field == "price":
+        try:
+            update_data['price'] = int(new_value)
+        except:
+            await message.answer("❌ Цена должна быть числом!")
+            return
+    elif edit_field == "code":
+        update_data['promo_code'] = new_value
+    
+    if update_shop_item(item_id, **update_data):
+        await message.answer(f"✅ Товар обновлен!")
+        
+        # Показываем обновленный товар
+        item = get_shop_item_by_id(item_id)
+        if item:
+            await show_shop_item_edit_menu(message, item)
+    else:
+        await message.answer("❌ Ошибка при обновлении товара")
+    
+    await state.clear()
+    
 @dp.callback_query(F.data == "add_shop_items")
 async def add_shop_items_start(callback: CallbackQuery, state: FSMContext):
     """Начало добавления нескольких товаров"""
@@ -3233,7 +3501,74 @@ async def add_shop_items_start(callback: CallbackQuery, state: FSMContext):
         f"STARDA502"
     )
     await state.set_state(AdminStates.waiting_for_promo_data)
+@dp.callback_query(F.data.startswith("delete_shop_item_"))
+async def delete_shop_item_confirm(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение удаления товара"""
+    await callback.answer()
+    
+    try:
+        item_id = int(callback.data.split("_")[3])
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных товара")
+        return
+    
+    item = get_shop_item_by_id(item_id)
+    if not item:
+        await safe_edit_message(callback.message, "❌ Товар не найден!")
+        return
+    
+    warning = ""
+    if item['is_used']:
+        warning = f"\n\n⚠️ Товар был куплен пользователем {item['buyer_id']}!"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_shop_{item_id}")],
+        [InlineKeyboardButton(text="❌ Нет, отмена", callback_data=f"edit_shop_item_{item_id}")]
+    ])
+    
+    await safe_edit_message(
+        callback.message,
+        f"⚠️ Вы уверены, что хотите удалить этот товар?{warning}\nЭто действие нельзя отменить!",
+        reply_markup=keyboard
+    )
 
+@dp.callback_query(F.data.startswith("confirm_delete_shop_"))
+async def confirm_delete_shop_item(callback: CallbackQuery):
+    """Подтвержденное удаление товара"""
+    await callback.answer()
+    
+    try:
+        item_id = int(callback.data.split("_")[3])
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных товара")
+        return
+    
+    if delete_shop_item(item_id):
+        await safe_edit_message(callback.message, "✅ Товар удален из магазина!")
+        await asyncio.sleep(1)
+        await admin_shop_menu(callback)
+    else:
+        await safe_edit_message(callback.message, "❌ Ошибка при удалении товара")
+
+@dp.callback_query(F.data.startswith("edit_shop_item_"))
+async def edit_shop_item_by_id(callback: CallbackQuery):
+    """Редактирование товара по прямому ID из списка"""
+    await callback.answer()
+    
+    try:
+        item_id = int(callback.data.split("_")[3])
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных товара")
+        return
+    
+    item = get_shop_item_by_id(item_id)
+    
+    if not item:
+        await safe_edit_message(callback.message, "❌ Товар не найден!")
+        return
+    
+    await show_shop_item_edit_menu(callback.message, item)
+    
 @dp.message(AdminStates.waiting_for_promo_data)
 async def add_shop_items_finish(message: Message, state: FSMContext):
     """Сохранение нескольких товаров"""
@@ -5377,6 +5712,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
