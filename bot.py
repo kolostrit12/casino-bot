@@ -1257,7 +1257,9 @@ def add_shop_items(name: str, price: int, promo_codes: List[str], project_id: in
 
 @retry_on_locked()
 def buy_shop_item(user_id: int, item_name: str, price: int) -> Tuple[bool, str, dict]:
-    """Купить один экземпляр товара (выбирает первый доступный)"""
+    """Купить один экземпляр товара"""
+    print(f"💰 buy_shop_item: user={user_id}, name={item_name}, price={price}")  # ОТЛАДКА
+    
     conn = None
     try:
         conn = get_db()
@@ -1275,21 +1277,27 @@ def buy_shop_item(user_id: int, item_name: str, price: int) -> Tuple[bool, str, 
         item_row = c.fetchone()
         
         if not item_row:
+            print(f"❌ Товар не найден: {item_name}, {price}")  # ОТЛАДКА
             return False, "Товар не найден или закончился", None
         
         item = dict(item_row)
+        print(f"✅ Найден товар: ID={item['id']}, код={item['promo_code']}")  # ОТЛАДКА
         
         c.execute("SELECT points, username, first_name FROM users WHERE user_id = ?", (user_id,))
         user_row = c.fetchone()
         
         if not user_row:
+            print(f"❌ Пользователь не найден: {user_id}")  # ОТЛАДКА
             return False, "Пользователь не найден", None
         
         user = dict(user_row)
+        print(f"✅ Баланс пользователя: {user['points']}")  # ОТЛАДКА
         
         if user['points'] < item['price']:
+            print(f"❌ Недостаточно баллов: {user['points']} < {item['price']}")  # ОТЛАДКА
             return False, f"Недостаточно баллов! Нужно {item['price']}", None
         
+        # Списываем баллы
         c.execute("UPDATE users SET points = points - ? WHERE user_id = ?", (item['price'], user_id))
         c.execute(
             "UPDATE shop_promocodes SET is_used = 1, buyer_id = ?, bought_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -1297,6 +1305,7 @@ def buy_shop_item(user_id: int, item_name: str, price: int) -> Tuple[bool, str, 
         )
         
         conn.commit()
+        print(f"✅ Покупка совершена!")  # ОТЛАДКА
         
         user_display = get_user_display(user_id, user['username'], user['first_name'])
         
@@ -1307,10 +1316,12 @@ def buy_shop_item(user_id: int, item_name: str, price: int) -> Tuple[bool, str, 
         )
         
         return True, item['promo_code'], item
+    except Exception as e:
+        print(f"❌ Ошибка в buy_shop_item: {e}")  # ОТЛАДКА
+        return False, f"Ошибка: {e}", None
     finally:
         if conn:
             conn.close()
-
 # ==================== ФУНКЦИИ ДЛЯ ПРОЕКТОВ ====================
 
 @retry_on_locked()
@@ -2587,25 +2598,27 @@ async def shop(message: Message, state: FSMContext):
             text += f"🏢 Проект: {item['project_title']}\n"
         text += "\n"
         
-        # Используем индекс вместо названия для callback_data
         keyboard.row(InlineKeyboardButton(
             text=f"🛒 Купить {item['name'][:20]}... | {item['price']}💰",
             callback_data=f"buy_{idx}_{item['price']}"
         ))
     
-    # Сохраняем список товаров в состоянии для последующего использования
     await state.update_data(shop_items=items)
     
     await message.answer(text, reply_markup=keyboard.as_markup(), parse_mode='HTML')
     await message.answer("Выберите действие:", reply_markup=get_main_keyboard(user_id))
 
+# ==================== ВАЖНО! РАЗНЫЕ ФИЛЬТРЫ ====================
+
+# 1. ПЕРВЫЙ - специфичный обработчик (только для формата buy_ЧИСЛО_ЧИСЛО)
 @dp.callback_query(F.data.startswith("buy_") & F.data.regex(r"^buy_\d+_\d+$"))
 async def buy_group_callback(callback: CallbackQuery, state: FSMContext):
-    """Покупка товара из группы (новый формат с индексом)"""
+    """Покупка товара из группы (только для формата с двумя числами)"""
+    print(f"✅ buy_group_callback сработал! Data: {callback.data}")
+    
     await callback.answer()
     
     try:
-        # Формат: buy_ИНДЕКС_ЦЕНА
         parts = callback.data.split("_")
         idx = int(parts[1])
         price = int(parts[2])
@@ -2615,31 +2628,27 @@ async def buy_group_callback(callback: CallbackQuery, state: FSMContext):
         items = data.get('shop_items', [])
         
         if not items:
-            # Если нет в состоянии, пробуем получить из базы
             items = get_shop_items()
-            if idx >= len(items):
-                await callback.message.edit_text("❌ Товар не найден")
+            if not items:
+                await callback.message.edit_text("❌ В магазине нет товаров")
                 return
-            item = items[idx]
-        else:
-            if idx >= len(items):
-                await callback.message.edit_text("❌ Товар не найден")
-                return
-            item = items[idx]
         
+        if idx >= len(items):
+            await callback.message.edit_text("❌ Товар не найден")
+            return
+        
+        item = items[idx]
         name = item['name']
         
     except Exception as e:
-        logger.error(f"Ошибка парсинга callback: {e}")
+        print(f"❌ Ошибка: {e}")
         await callback.message.edit_text("❌ Ошибка при обработке запроса")
         return
     
     user_id = callback.from_user.id
-    
     success, result, purchased_item = buy_shop_item(user_id, name, price)
     
     if success:
-        # Проверяем, сколько осталось
         items_left = get_shop_items()
         remaining = 0
         for it in items_left:
@@ -2663,12 +2672,20 @@ async def buy_group_callback(callback: CallbackQuery, state: FSMContext):
     
     await callback.message.answer("Выберите действие:", reply_markup=get_main_keyboard(user_id))
 
+# 2. ВТОРОЙ - универсальный (только для формата buy_ЧИСЛО - старые товары)
+@dp.callback_query(F.data.startswith("buy_") & F.data.regex(r"^buy_\d+$"))
+async def buy_legacy_callback(callback: CallbackQuery):
+    """Старый формат покупки по ID товара"""
+    print(f"⚠️ buy_legacy_callback сработал! Data: {callback.data}")
+    await callback.answer("⚠️ Этот формат покупки устарел", show_alert=True)
+
+# 3. ТРЕТИЙ - универсальный обработчик для всех остальных форматов
 @dp.callback_query(F.data.startswith("buy_"))
 async def buy_fallback_callback(callback: CallbackQuery):
     """Универсальный обработчик для любых других форматов buy_"""
+    print(f"⚠️ Fallback поймал неизвестный формат: {callback.data}")
     await callback.answer("❌ Неверный формат данных", show_alert=True)
-    logger.warning(f"Неизвестный формат buy_: {callback.data}")
-# ==================== БОНУСЫ ====================
+ # ==================== БОНУСЫ ====================
 
 @dp.message(F.text == "🎁 БОНУСЫ")
 async def bonuses_menu(message: Message, state: FSMContext):
@@ -5751,6 +5768,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
