@@ -88,19 +88,31 @@ def get_user_display(user_id: int, username: str = None, first_name: str = None)
 # ВСТАВЬТЕ СЮДА ↓↓↓
 def convert_imgur_url(url: str) -> str:
     """Конвертирует Imgur URL в прямую ссылку на изображение"""
+    if not url or url == "0":
+        return None
+        
     if 'imgur.com' in url:
-        # Извлекаем ID изображения
-        if 'i.imgur.com' not in url:
-            # Формат: https://imgur.com/XXXXXXX
-            img_id = url.split('/')[-1].split('?')[0]
-            return f"https://i.imgur.com/{img_id}.jpg"
+        # Очищаем URL от параметров
+        base_url = url.split('?')[0]
+        
+        # Разные форматы Imgur URL
+        if 'i.imgur.com' in base_url:
+            # Уже прямая ссылка, проверяем расширение
+            if not any(base_url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
+                return base_url + '.jpg'
+            return base_url
         else:
-            # Уже прямая ссылка, но может быть без расширения
-            if not url.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                return url + '.jpg'
+            # Формат: https://imgur.com/XXXXXXX или https://imgur.com/a/XXXXXXX
+            # Извлекаем ID изображения
+            parts = base_url.split('/')
+            img_id = parts[-1]
+            # Удаляем возможные расширения из ID
+            img_id = img_id.split('.')[0]
+            return f"https://i.imgur.com/{img_id}.jpg"
+    
     return url
 # ↑↑↑ ВСТАВЬТЕ СЮДА
-# ==================== СОСТОЯНИЯ FSM ====================
+ # ==================== СОСТОЯНИЯ FSM ====================
 class AdminStates(StatesGroup):
     waiting_for_password = State()
     waiting_for_project_data = State()
@@ -2136,58 +2148,75 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
     # Обновляем индекс в состоянии
     await state.update_data(current_index=index)
     
+    # Проверяем, есть ли фото
+    photo_url = project.get('photo_url')
+    
     # Отправляем или редактируем сообщение
     if is_new_message:
         # Первый проект - отправляем новое сообщение
-        if project.get('photo_url'):
+        if photo_url:
             try:
                 await message.answer_photo(
-                    photo=project['photo_url'],
+                    photo=photo_url,
                     caption=text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
-                    disable_web_page_preview=True  # Добавлено!
+                    disable_web_page_preview=True
                 )
             except Exception as e:
                 logger.error(f"Ошибка при отправке фото: {e}")
                 await message.answer(
-                    text,
+                    text + f"\n\n⚠️ Ошибка загрузки фото: {photo_url}",
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
-                    disable_web_page_preview=True  # Добавлено!
+                    disable_web_page_preview=True
                 )
         else:
             await message.answer(
                 text,
                 reply_markup=keyboard.as_markup(),
                 parse_mode='HTML',
-                disable_web_page_preview=True  # Добавлено!
+                disable_web_page_preview=True
             )
     else:
         # Редактируем существующее сообщение
-        if project.get('photo_url'):
+        if photo_url:
             try:
-                await message.edit_caption(
-                    caption=text,
-                    reply_markup=keyboard.as_markup(),
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                try:
-                    await message.edit_text(
-                        text,
+                # Проверяем, есть ли у сообщения caption (значит это фото)
+                if callback.message.caption is not None:
+                    await callback.message.edit_caption(
+                        caption=text,
+                        reply_markup=keyboard.as_markup(),
+                        parse_mode='HTML'
+                    )
+                else:
+                    # Если это текстовое сообщение, но нужно показать фото
+                    # Удаляем старое и отправляем новое с фото
+                    await callback.message.delete()
+                    await callback.message.answer_photo(
+                        photo=photo_url,
+                        caption=text,
                         reply_markup=keyboard.as_markup(),
                         parse_mode='HTML',
-                        disable_web_page_preview=True  # Добавлено!
+                        disable_web_page_preview=True
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при редактировании фото: {e}")
+                try:
+                    await callback.message.edit_text(
+                        text + f"\n\n⚠️ Ошибка загрузки фото",
+                        reply_markup=keyboard.as_markup(),
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
                     )
                 except Exception as e2:
-                    logger.error(f"Ошибка при редактировании: {e2}")
+                    logger.error(f"Ошибка при редактировании текста: {e2}")
         else:
-            await message.edit_text(
+            await callback.message.edit_text(
                 text,
                 reply_markup=keyboard.as_markup(),
                 parse_mode='HTML',
-                disable_web_page_preview=True  # Добавлено!
+                disable_web_page_preview=True
             )
     
     # Обновляем индекс в состоянии
@@ -3172,25 +3201,44 @@ async def edit_project_photo_start(callback: CallbackQuery, state: FSMContext):
     """Начало изменения фото проекта"""
     await callback.answer()
     try:
-        # Правильное разбиение: edit_project_photo_ID
-        parts = callback.data.split("_")
-        # parts = ['edit', 'project', 'photo', 'ID']
-        if len(parts) >= 4:
-            project_id = int(parts[3])
-        else:
+        # Разбираем callback_data: edit_project_photo_ID
+        # Например: edit_project_photo_18
+        data_parts = callback.data.split("_")
+        
+        # Проверяем, что у нас достаточно частей
+        if len(data_parts) < 4:
+            logger.error(f"Недостаточно частей в callback_data: {callback.data}")
             await safe_edit_message(callback.message, "❌ Неверный формат данных")
             return
-            
+        
+        # ID проекта находится на 4-й позиции (индекс 3)
+        project_id = int(data_parts[3])
+        
+        # Сохраняем данные в состоянии
         await state.update_data(project_id=project_id, edit_field="photo")
+        
+        # Отправляем сообщение с инструкцией
         await safe_edit_message(
             callback.message, 
+            "📸 <b>Изменение фото проекта</b>\n\n"
             "Введите новую ссылку на фото (или 0 чтобы удалить):\n\n"
-            "Для Imgur используйте прямую ссылку вида:\n"
-            "https://i.imgur.com/XXXXXXX.jpg"
+            "✅ <b>Правильные форматы:</b>\n"
+            "• https://i.imgur.com/abc123.jpg\n"
+            "• https://example.com/image.png\n"
+            "• 0 (удалить фото)\n\n"
+            "❌ <b>Неправильные форматы:</b>\n"
+            "• https://imgur.com/abc123\n"
+            "• Короткие ссылки\n\n"
+            "Для Imgur используйте прямую ссылку вида <code>https://i.imgur.com/XXXXXXX.jpg</code>",
+            parse_mode='HTML'
         )
         await state.set_state(AdminStates.waiting_for_project_edit)
+        
+    except ValueError as e:
+        logger.error(f"Ошибка преобразования ID в edit_project_photo_start: {e}, data: {callback.data}")
+        await safe_edit_message(callback.message, "❌ Неверный ID проекта")
     except Exception as e:
-        logger.error(f"Ошибка в edit_project_photo_start: {e}")
+        logger.error(f"Неизвестная ошибка в edit_project_photo_start: {e}")
         await safe_edit_message(callback.message, "❌ Ошибка в данных проекта")
 
 @dp.message(AdminStates.waiting_for_project_edit)
@@ -3200,6 +3248,8 @@ async def edit_project_finish(message: Message, state: FSMContext):
     project_id = data['project_id']
     edit_field = data['edit_field']
     new_value = message.text.strip()
+    
+    logger.info(f"Редактирование проекта {project_id}, поле {edit_field}, значение: {new_value}")
     
     update_data = {}
     if edit_field == "title":
@@ -3216,8 +3266,15 @@ async def edit_project_finish(message: Message, state: FSMContext):
         else:
             # Конвертируем ссылку Imgur в прямой формат
             converted_url = convert_imgur_url(new_value)
-            update_data['photo_url'] = converted_url
-            await message.answer(f"✅ Фото добавлено: {converted_url}")
+            logger.info(f"Ссылка на фото: исходная={new_value}, конвертированная={converted_url}")
+            
+            # Проверяем, что ссылка рабочая (опционально)
+            if converted_url:
+                update_data['photo_url'] = converted_url
+                await message.answer(f"✅ Фото добавлено: {converted_url}")
+            else:
+                await message.answer("❌ Неверная ссылка на фото")
+                return
     
     if update_data:
         if update_project(project_id, **update_data):
@@ -5803,6 +5860,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
