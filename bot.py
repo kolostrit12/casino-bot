@@ -84,41 +84,41 @@ def get_user_display(user_id: int, username: str = None, first_name: str = None)
     else:
         return f"ID: {user_id}"
 
- # ==================== ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ССЫЛОК IMGUR ====================
 def convert_imgur_url(url: str) -> str:
-    """Конвертирует Imgur URL в прямую ссылку на изображение"""
+    """Конвертирует URL в рабочий формат"""
     if not url or url == "0":
         return None
-        
-    # Если это уже прямая ссылка на изображение
+    
+    # Если это уже прямая ссылка с расширением
     if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
         return url
     
-    if 'imgur.com' in url:
-        # Очищаем URL от параметров
-        base_url = url.split('?')[0]
-        
-        # Убираем слеш в конце если есть
-        base_url = base_url.rstrip('/')
-        
-        # Разные форматы Imgur URL
-        if 'i.imgur.com' in base_url:
-            # Уже прямая ссылка, но может быть без расширения
-            if not any(base_url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
-                return base_url + '.jpg'
-            return base_url
-        else:
-            # Формат: https://imgur.com/XXXXXXX или https://imgur.com/a/XXXXXXX
-            # Извлекаем ID изображения
-            parts = base_url.split('/')
-            img_id = parts[-1]
-            # Удаляем возможные расширения из ID
-            img_id = img_id.split('.')[0]
-            return f"https://i.imgur.com/{img_id}.jpg"
-    
-    # Если это ссылка на Telegra.ph
+    # Telegraph ссылки
     if 'telegra.ph' in url:
         return url
+    
+    # Postimages
+    if 'postimg.cc' in url or 'postimages.org' in url:
+        # Преобразуем в прямую ссылку если нужно
+        if 'i.postimg.cc' not in url:
+            # Извлекаем ID
+            import re
+            match = re.search(r'/([^/]+)$', url)
+            if match:
+                return f"https://i.postimg.cc/{match.group(1)}"
+        return url
+    
+    # ImgBB
+    if 'ibb.co' in url:
+        if 'i.ibb.co' not in url:
+            # Преобразуем в прямую ссылку
+            return url.replace('ibb.co', 'i.ibb.co') + '.jpg'
+        return url
+    
+    # Если это ссылка на Imgur, показываем предупреждение
+    if 'imgur.com' in url:
+        logger.warning(f"Попытка использовать Imgur: {url}")
+        return url  # Пробуем, но скорее всего не сработает
     
     # Если это другая ссылка, просто возвращаем как есть
     return url
@@ -3100,8 +3100,13 @@ async def add_project_start(callback: CallbackQuery, state: FSMContext):
         callback.message,
         "Введите данные проекта в формате:\n"
         "Название | Ссылка | Промокод | Ссылка на фото (необязательно)\n\n"
-        "Пример: Casino X | https://example.com | XBONUS | https://i.imgur.com/XXXXXXX.jpg\n\n"
-        "Для Imgur используйте прямую ссылку вида https://i.imgur.com/XXXXXXX.jpg"
+        "Пример: Casino X | https://example.com | XBONUS | https://telegra.ph/file/xxx.jpg\n\n"
+        "✅ <b>Рекомендуемые хостинги (работают в РФ):</b>\n"
+        "• <b>Telegraph</b> - через @Telegraph_bot\n"
+        "• <b>Postimages</b> - https://postimages.org (берите Direct link)\n"
+        "• <b>ImgBB</b> - https://imgbb.com (берите Direct link)\n\n"
+        "❌ <b>Imgur НЕ РАБОТАЕТ</b> в России",
+        parse_mode='HTML'
     )
     await state.set_state(AdminStates.waiting_for_project_data)
 
@@ -3217,11 +3222,10 @@ async def edit_project_photo_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     try:
         # Разбираем callback_data: edit_project_photo_ID
-        # Например: edit_project_photo_18
         data_parts = callback.data.split("_")
         
-        # Добавим отладку
-        print(f"edit_project_photo_start: data={callback.data}, parts={data_parts}")
+        # Выводим отладку в логи
+        logger.info(f"edit_project_photo_start: data={callback.data}, parts={data_parts}")
         
         # Проверяем, что у нас достаточно частей
         if len(data_parts) < 4:
@@ -3229,11 +3233,12 @@ async def edit_project_photo_start(callback: CallbackQuery, state: FSMContext):
             await safe_edit_message(callback.message, "❌ Неверный формат данных (мало частей)")
             return
         
-        # ID проекта находится на 4-й позиции (индекс 3)
+        # ID проекта находится на последней позиции
+        # Формат: edit_project_photo_18 -> части: ['edit', 'project', 'photo', '18']
         try:
-            project_id = int(data_parts[3])
-        except ValueError:
-            logger.error(f"Не удалось преобразовать ID: {data_parts[3]}")
+            project_id = int(data_parts[-1])  # Берем последний элемент
+        except ValueError as e:
+            logger.error(f"Не удалось преобразовать ID: {data_parts[-1]}, ошибка: {e}")
             await safe_edit_message(callback.message, "❌ Неверный ID проекта")
             return
         
@@ -3245,14 +3250,13 @@ async def edit_project_photo_start(callback: CallbackQuery, state: FSMContext):
             callback.message, 
             "📸 <b>Изменение фото проекта</b>\n\n"
             "Введите новую ссылку на фото (или 0 чтобы удалить):\n\n"
-            "✅ <b>Правильные форматы:</b>\n"
-            "• https://i.imgur.com/abc123.jpg\n"
-            "• https://telegra.ph/file/xxx.jpg\n"
-            "• 0 (удалить фото)\n\n"
-            "❌ <b>Неправильные форматы:</b>\n"
-            "• https://imgur.com/abc123 (без i.)\n"
-            "• Короткие ссылки\n\n"
-            "Для Imgur используйте прямую ссылку вида <code>https://i.imgur.com/XXXXXXX.jpg</code>",
+            "✅ <b>Рекомендуемые хостинги (работают в РФ):</b>\n"
+            "• <b>Telegra.ph</b> - https://telegra.ph/file/xxx.jpg\n"
+            "• <b>Postimages</b> - https://i.postimg.cc/xxx.jpg\n"
+            "• <b>ImgBB</b> - https://ibb.co/xxx\n"
+            "• <b>Ваш собственный хостинг</b>\n\n"
+            "❌ <b>Imgur НЕ РАБОТАЕТ</b> в России и многих странах\n\n"
+            "Для Telegra.ph: загрузите фото в @Telegraph_bot и скопируйте ссылку",
             parse_mode='HTML'
         )
         await state.set_state(AdminStates.waiting_for_project_edit)
@@ -5888,6 +5892,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
