@@ -12,13 +12,13 @@ from typing import Dict, List, Tuple, Optional
 from contextlib import contextmanager
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, 
-    InlineKeyboardButton, CallbackQuery, Message, FSInputFile
+    InlineKeyboardButton, CallbackQuery, Message, FSInputFile, BufferedInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -2619,7 +2619,7 @@ async def activate_promo_start(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state("waiting_for_promo_code")
 
-@dp.message(F.text, state="waiting_for_promo_code")
+@dp.message(F.text, StateFilter("waiting_for_promo_code"))
 async def activate_promo_process(message: Message, state: FSMContext):
     """Обработка введенного промокода"""
     user_id = message.from_user.id
@@ -5278,6 +5278,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
