@@ -2610,16 +2610,23 @@ async def shop(message: Message, state: FSMContext):
 
 # ==================== ВАЖНО! РАЗНЫЕ ФИЛЬТРЫ ====================
 
-# 1. ПЕРВЫЙ - специфичный обработчик (только для формата buy_ЧИСЛО_ЧИСЛО)
-@dp.callback_query(F.data.startswith("buy_") & F.data.regex(r"^buy_\d+_\d+$"))
+# ТОЛЬКО ОДИН ОБРАБОТЧИК!
+@dp.callback_query(F.data.startswith("buy_"))
 async def buy_group_callback(callback: CallbackQuery, state: FSMContext):
-    """Покупка товара из группы (только для формата с двумя числами)"""
-    print(f"✅ buy_group_callback сработал! Data: {callback.data}")
+    """Единый обработчик для всех покупок"""
+    print(f"✅ buy_callback сработал! Data: {callback.data}")
     
     await callback.answer()
     
     try:
         parts = callback.data.split("_")
+        
+        # Проверяем формат (должен быть buy_ИНДЕКС_ЦЕНА)
+        if len(parts) != 3:
+            print(f"❌ Неправильный формат: {parts}")
+            await callback.message.edit_text("❌ Неверный формат данных")
+            return
+        
         idx = int(parts[1])
         price = int(parts[2])
         
@@ -2672,19 +2679,7 @@ async def buy_group_callback(callback: CallbackQuery, state: FSMContext):
     
     await callback.message.answer("Выберите действие:", reply_markup=get_main_keyboard(user_id))
 
-# 2. ВТОРОЙ - универсальный (только для формата buy_ЧИСЛО - старые товары)
-@dp.callback_query(F.data.startswith("buy_") & F.data.regex(r"^buy_\d+$"))
-async def buy_legacy_callback(callback: CallbackQuery):
-    """Старый формат покупки по ID товара"""
-    print(f"⚠️ buy_legacy_callback сработал! Data: {callback.data}")
-    await callback.answer("⚠️ Этот формат покупки устарел", show_alert=True)
 
-# 3. ТРЕТИЙ - универсальный обработчик для всех остальных форматов
-@dp.callback_query(F.data.startswith("buy_"))
-async def buy_fallback_callback(callback: CallbackQuery):
-    """Универсальный обработчик для любых других форматов buy_"""
-    print(f"⚠️ Fallback поймал неизвестный формат: {callback.data}")
-    await callback.answer("❌ Неверный формат данных", show_alert=True)
  # ==================== БОНУСЫ ====================
 
 @dp.message(F.text == "🎁 БОНУСЫ")
@@ -5768,6 +5763,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
