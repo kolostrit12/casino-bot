@@ -3251,16 +3251,16 @@ async def edit_project_photo_start(callback: CallbackQuery, state: FSMContext):
         logger.info(f"edit_project_photo_start: data={callback.data}, parts={data_parts}")
         
         # Проверяем формат данных
-        if len(data_parts) != 4:
-            logger.error(f"Неверный формат callback_data: {callback.data}")
-            await safe_edit_message(callback.message, "❌ Неверный формат данных")
+        if len(data_parts) < 4:
+            logger.error(f"Недостаточно частей в callback_data: {callback.data}")
+            await safe_edit_message(callback.message, "❌ Неверный формат данных (мало частей)")
             return
         
         # Получаем ID проекта (последняя часть)
         try:
-            project_id = int(data_parts[3])
+            project_id = int(data_parts[-1])  # Берем последний элемент
         except ValueError:
-            logger.error(f"Не удалось преобразовать ID: {data_parts[3]}")
+            logger.error(f"Не удалось преобразовать ID: {data_parts[-1]}")
             await safe_edit_message(callback.message, "❌ Неверный ID проекта")
             return
         
@@ -5913,6 +5913,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
