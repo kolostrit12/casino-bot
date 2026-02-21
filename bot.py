@@ -3159,7 +3159,71 @@ async def add_project_finish(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка! {str(e)}")
     
     await state.clear()
-
+@dp.callback_query(F.data.startswith("edit_project_photo_"))
+async def edit_project_photo_start(callback: CallbackQuery, state: FSMContext):
+    """Начало изменения фото проекта"""
+    await callback.answer()
+    try:
+        # Разбираем callback_data
+        data_parts = callback.data.split("_")
+        
+        # ПОДРОБНОЕ ЛОГИРОВАНИЕ
+        logger.error(f"🔴 edit_project_photo_start ПОЛУЧЕН: data={callback.data}")
+        logger.error(f"🔴 Разделенные части: {data_parts}")
+        logger.error(f"🔴 Количество частей: {len(data_parts)}")
+        
+        # Проверяем разные возможные форматы
+        if len(data_parts) == 4:  # Формат: edit_project_photo_ID
+            try:
+                project_id = int(data_parts[3])
+                logger.error(f"🔴 ID из индекса 3: {project_id}")
+            except ValueError:
+                logger.error(f"🔴 Не удалось преобразовать ID из индекса 3: {data_parts[3]}")
+                project_id = None
+        elif len(data_parts) == 5:  # Возможно другой формат
+            try:
+                project_id = int(data_parts[4])
+                logger.error(f"🔴 ID из индекса 4: {project_id}")
+            except ValueError:
+                logger.error(f"🔴 Не удалось преобразовать ID из индекса 4: {data_parts[4]}")
+                project_id = None
+        else:
+            # Пробуем взять последний элемент
+            try:
+                project_id = int(data_parts[-1])
+                logger.error(f"🔴 ID из последнего элемента: {project_id}")
+            except ValueError:
+                logger.error(f"🔴 Не удалось преобразовать ID из последнего: {data_parts[-1]}")
+                project_id = None
+        
+        if project_id is None:
+            await safe_edit_message(callback.message, "❌ Неверный формат ID проекта")
+            return
+        
+        # Сохраняем в состоянии
+        await state.update_data(project_id=project_id, edit_field="photo")
+        
+        # Отправляем инструкцию
+        await safe_edit_message(
+            callback.message,
+            "📸 <b>Изменение фото проекта</b>\n\n"
+            "Введите новую ссылку на фото (или 0 чтобы удалить):\n\n"
+            "✅ <b>Как получить ссылку:</b>\n"
+            "1. Зайдите на https://postimages.org\n"
+            "2. Загрузите фото\n"
+            "3. Выберите 'Direct link'\n"
+            "4. Вставьте ссылку сюда\n\n"
+            "Пример: https://i.postimg.cc/xyz123/photo.jpg",
+            parse_mode='HTML'
+        )
+        await state.set_state(AdminStates.waiting_for_project_edit)
+        
+    except Exception as e:
+        logger.error(f"🔴 Критическая ошибка в edit_project_photo_start: {e}")
+        import traceback
+        traceback.print_exc()
+        await safe_edit_message(callback.message, f"❌ Ошибка: {str(e)}")
+        
 @dp.callback_query(F.data.startswith("edit_project_") & ~F.data.startswith("edit_project_title_") & ~F.data.startswith("edit_project_url_") & ~F.data.startswith("edit_project_promo_"))
 async def edit_project_handler(callback: CallbackQuery):
     """Меню редактирования проекта"""
@@ -3238,71 +3302,6 @@ async def edit_project_promo_start(callback: CallbackQuery, state: FSMContext):
         await state.set_state(AdminStates.waiting_for_project_edit)
     except:
         await safe_edit_message(callback.message, "❌ Ошибка в данных проекта")
-
-@dp.callback_query(F.data.startswith("edit_project_photo_"))
-async def edit_project_photo_start(callback: CallbackQuery, state: FSMContext):
-    """Начало изменения фото проекта"""
-    await callback.answer()
-    try:
-        # Разбираем callback_data
-        data_parts = callback.data.split("_")
-        
-        # ПОДРОБНОЕ ЛОГИРОВАНИЕ
-        logger.error(f"🔴 edit_project_photo_start ПОЛУЧЕН: data={callback.data}")
-        logger.error(f"🔴 Разделенные части: {data_parts}")
-        logger.error(f"🔴 Количество частей: {len(data_parts)}")
-        
-        # Проверяем разные возможные форматы
-        if len(data_parts) == 4:  # Формат: edit_project_photo_ID
-            try:
-                project_id = int(data_parts[3])
-                logger.error(f"🔴 ID из индекса 3: {project_id}")
-            except ValueError:
-                logger.error(f"🔴 Не удалось преобразовать ID из индекса 3: {data_parts[3]}")
-                project_id = None
-        elif len(data_parts) == 5:  # Возможно другой формат
-            try:
-                project_id = int(data_parts[4])
-                logger.error(f"🔴 ID из индекса 4: {project_id}")
-            except ValueError:
-                logger.error(f"🔴 Не удалось преобразовать ID из индекса 4: {data_parts[4]}")
-                project_id = None
-        else:
-            # Пробуем взять последний элемент
-            try:
-                project_id = int(data_parts[-1])
-                logger.error(f"🔴 ID из последнего элемента: {project_id}")
-            except ValueError:
-                logger.error(f"🔴 Не удалось преобразовать ID из последнего: {data_parts[-1]}")
-                project_id = None
-        
-        if project_id is None:
-            await safe_edit_message(callback.message, "❌ Неверный формат ID проекта")
-            return
-        
-        # Сохраняем в состоянии
-        await state.update_data(project_id=project_id, edit_field="photo")
-        
-        # Отправляем инструкцию
-        await safe_edit_message(
-            callback.message,
-            "📸 <b>Изменение фото проекта</b>\n\n"
-            "Введите новую ссылку на фото (или 0 чтобы удалить):\n\n"
-            "✅ <b>Как получить ссылку:</b>\n"
-            "1. Зайдите на https://postimages.org\n"
-            "2. Загрузите фото\n"
-            "3. Выберите 'Direct link'\n"
-            "4. Вставьте ссылку сюда\n\n"
-            "Пример: https://i.postimg.cc/xyz123/photo.jpg",
-            parse_mode='HTML'
-        )
-        await state.set_state(AdminStates.waiting_for_project_edit)
-        
-    except Exception as e:
-        logger.error(f"🔴 Критическая ошибка в edit_project_photo_start: {e}")
-        import traceback
-        traceback.print_exc()
-        await safe_edit_message(callback.message, f"❌ Ошибка: {str(e)}")
 
 @dp.message(AdminStates.waiting_for_project_edit)
 async def edit_project_finish(message: Message, state: FSMContext):
@@ -5931,6 +5930,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
