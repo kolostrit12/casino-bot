@@ -2166,7 +2166,7 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
             except Exception as e:
                 logger.error(f"Ошибка при отправке фото: {e}")
                 await message.answer(
-                    text + f"\n\n⚠️ Ошибка загрузки фото: {photo_url}",
+                    text + f"\n\n⚠️ Ошибка загрузки фото",
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
                     disable_web_page_preview=True
@@ -2182,9 +2182,9 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
         # Редактируем существующее сообщение
         if photo_url:
             try:
-                # Проверяем, есть ли у сообщения caption (значит это фото)
-                if callback.message.caption is not None:
-                    await callback.message.edit_caption(
+                # Проверяем, есть ли у сообщения caption (значит это сообщение с фото)
+                if hasattr(message, 'caption') and message.caption is not None:
+                    await message.edit_caption(
                         caption=text,
                         reply_markup=keyboard.as_markup(),
                         parse_mode='HTML'
@@ -2192,8 +2192,8 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
                 else:
                     # Если это текстовое сообщение, но нужно показать фото
                     # Удаляем старое и отправляем новое с фото
-                    await callback.message.delete()
-                    await callback.message.answer_photo(
+                    await message.delete()
+                    await message.answer_photo(
                         photo=photo_url,
                         caption=text,
                         reply_markup=keyboard.as_markup(),
@@ -2203,7 +2203,7 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
             except Exception as e:
                 logger.error(f"Ошибка при редактировании фото: {e}")
                 try:
-                    await callback.message.edit_text(
+                    await message.edit_text(
                         text + f"\n\n⚠️ Ошибка загрузки фото",
                         reply_markup=keyboard.as_markup(),
                         parse_mode='HTML',
@@ -2212,12 +2212,16 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
                 except Exception as e2:
                     logger.error(f"Ошибка при редактировании текста: {e2}")
         else:
-            await callback.message.edit_text(
-                text,
-                reply_markup=keyboard.as_markup(),
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
+            # Просто текстовое сообщение без фото
+            try:
+                await message.edit_text(
+                    text,
+                    reply_markup=keyboard.as_markup(),
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                logger.error(f"Ошибка при редактировании текста: {e}")
     
     # Обновляем индекс в состоянии
     await state.update_data(current_index=index)
@@ -2232,6 +2236,7 @@ async def project_prev(callback: CallbackQuery, state: FSMContext):
     
     if current_index > 0:
         new_index = current_index - 1
+        # Передаем callback.message, а не callback
         await show_project(callback.message, state, new_index, is_new_message=False)
     else:
         await callback.answer("Это первый проект", show_alert=True)
@@ -2247,6 +2252,7 @@ async def project_next(callback: CallbackQuery, state: FSMContext):
     
     if current_index < len(projects) - 1:
         new_index = current_index + 1
+        # Передаем callback.message, а не callback
         await show_project(callback.message, state, new_index, is_new_message=False)
     else:
         await callback.answer("Это последний проект", show_alert=True)
@@ -5860,6 +5866,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
