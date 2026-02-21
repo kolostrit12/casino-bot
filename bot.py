@@ -98,6 +98,10 @@ class AdminStates(StatesGroup):
     waiting_for_mailing_confirm = State()
     waiting_for_jackpot_promo = State()
     waiting_for_mines_count = State()
+    waiting_for_promo_code_name = State()      # Название промокода
+    waiting_for_promo_code_value = State()     # Количество баллов
+    waiting_for_promo_code_uses = State()      # Количество активаций
+    waiting_for_promo_code_edit = State()      # Редактирование промокода
     
 # ==================== СОСТОЯНИЯ ДЛЯ ИГРЫ MINES ====================
 class MinesStates(StatesGroup):
@@ -383,6 +387,67 @@ def migrate_db():
         
     except Exception as e:
         print(f"❌ Ошибка при миграции: {e}")
+    finally:
+        if conn:
+            conn.close()
+def migrate_projects_table():
+    """Миграция таблицы projects - добавление колонки photo_url"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Проверяем, есть ли колонка photo_url
+        c.execute("PRAGMA table_info(projects)")
+        columns = [col['name'] for col in c.fetchall()]
+        
+        if 'photo_url' not in columns:
+            c.execute("ALTER TABLE projects ADD COLUMN photo_url TEXT DEFAULT NULL")
+            print("✅ Добавлена колонка photo_url в таблицу projects")
+        
+        conn.commit()
+        print("✅ Миграция таблицы projects завершена")
+        
+    except Exception as e:
+        print(f"❌ Ошибка при миграции projects: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def migrate_promocodes_table():
+    """Миграция для создания таблицы промокодов"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Таблица промокодов
+        c.execute('''CREATE TABLE IF NOT EXISTS promocodes
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      code TEXT UNIQUE,
+                      name TEXT,
+                      points INTEGER,
+                      max_uses INTEGER,
+                      used_count INTEGER DEFAULT 0,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      expires_at DATE DEFAULT NULL,
+                      is_active BOOLEAN DEFAULT 1)''')
+        
+        # Таблица активаций промокодов пользователями
+        c.execute('''CREATE TABLE IF NOT EXISTS promo_activations
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      promo_id INTEGER,
+                      user_id INTEGER,
+                      activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY (promo_id) REFERENCES promocodes (id),
+                      FOREIGN KEY (user_id) REFERENCES users (user_id),
+                      UNIQUE(promo_id, user_id))''')
+        
+        conn.commit()
+        print("✅ Таблицы для промокодов созданы")
+        
+    except Exception as e:
+        print(f"❌ Ошибка при создании таблиц промокодов: {e}")
     finally:
         if conn:
             conn.close()
@@ -1205,15 +1270,15 @@ def get_project_by_id(project_id: int):
             conn.close()
 
 @retry_on_locked()
-def add_project(title: str, url: str, promo_code: str):
-    """Добавить проект"""
+def add_project(title: str, url: str, promo_code: str, photo_url: str = None):
+    """Добавить проект с фото"""
     conn = None
     try:
         conn = get_db()
         c = conn.cursor()
         c.execute(
-            "INSERT INTO projects (title, url, promo_code) VALUES (?, ?, ?)",
-            (title, url, promo_code)
+            "INSERT INTO projects (title, url, promo_code, photo_url) VALUES (?, ?, ?, ?)",
+            (title, url, promo_code, photo_url)
         )
         conn.commit()
         return c.lastrowid
@@ -1229,7 +1294,7 @@ def update_project(project_id: int, **kwargs):
         conn = get_db()
         c = conn.cursor()
         
-        allowed_fields = ['title', 'url', 'promo_code', 'is_active']
+        allowed_fields = ['title', 'url', 'promo_code', 'photo_url', 'is_active']
         updates = []
         params = []
         
@@ -1444,6 +1509,194 @@ def update_mines_settings(default_mines: int):
         return True
     except Exception as e:
         logger.error(f"Ошибка при обновлении настроек Mines: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+# ==================== ФУНКЦИИ ДЛЯ ПРОМОКОДОВ ====================
+
+@retry_on_locked()
+def add_promocode(code: str, name: str, points: int, max_uses: int, expires_at: str = None):
+    """Добавить новый промокод"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO promocodes (code, name, points, max_uses, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (code.upper(), name, points, max_uses, expires_at)
+        )
+        conn.commit()
+        return c.lastrowid
+    except sqlite3.IntegrityError:
+        return None  # Промокод с таким кодом уже существует
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def get_all_promocodes(include_inactive: bool = False) -> List:
+    """Получить все промокоды"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        if include_inactive:
+            c.execute("SELECT * FROM promocodes ORDER BY created_at DESC")
+        else:
+            c.execute("SELECT * FROM promocodes WHERE is_active = 1 ORDER BY created_at DESC")
+        return [dict(row) for row in c.fetchall()]
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def get_promocode_by_id(promo_id: int):
+    """Получить промокод по ID"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT * FROM promocodes WHERE id = ?", (promo_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def get_promocode_by_code(code: str):
+    """Получить промокод по коду"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT * FROM promocodes WHERE code = ?", (code.upper(),))
+        row = c.fetchone()
+        return dict(row) if row else None
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def update_promocode(promo_id: int, **kwargs):
+    """Обновить промокод"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        allowed_fields = ['code', 'name', 'points', 'max_uses', 'expires_at', 'is_active']
+        updates = []
+        params = []
+        
+        for field, value in kwargs.items():
+            if field in allowed_fields:
+                updates.append(f"{field} = ?")
+                params.append(value)
+        
+        if not updates:
+            return False
+        
+        params.append(promo_id)
+        c.execute(f"UPDATE promocodes SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+        return c.rowcount > 0
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def delete_promocode(promo_id: int):
+    """Удалить промокод"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM promo_activations WHERE promo_id = ?", (promo_id,))
+        c.execute("DELETE FROM promocodes WHERE id = ?", (promo_id,))
+        conn.commit()
+        return c.rowcount > 0
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def check_promocode_available(code: str, user_id: int) -> dict:
+    """Проверить доступность промокода для пользователя"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Получаем промокод
+        c.execute("SELECT * FROM promocodes WHERE code = ?", (code.upper(),))
+        promo = c.fetchone()
+        
+        if not promo:
+            return {"success": False, "message": "❌ Данный промокод не существует"}
+        
+        promo = dict(promo)
+        
+        # Проверяем, активен ли промокод
+        if not promo['is_active']:
+            return {"success": False, "message": "❌ Этот промокод деактивирован"}
+        
+        # Проверяем срок действия
+        if promo['expires_at']:
+            expires = datetime.strptime(promo['expires_at'], "%Y-%m-%d").date()
+            if expires < datetime.now().date():
+                return {"success": False, "message": "❌ Срок действия промокода истек"}
+        
+        # Проверяем количество активаций
+        if promo['used_count'] >= promo['max_uses']:
+            return {"success": False, "message": "❌ Лимит активаций этого промокода исчерпан"}
+        
+        # Проверял ли пользователь уже этот промокод
+        c.execute(
+            "SELECT * FROM promo_activations WHERE promo_id = ? AND user_id = ?",
+            (promo['id'], user_id)
+        )
+        if c.fetchone():
+            return {"success": False, "message": "❌ Вы уже активировали этот промокод"}
+        
+        return {"success": True, "promo": promo}
+        
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def activate_promocode(promo_id: int, user_id: int) -> bool:
+    """Активировать промокод для пользователя"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Начисляем баллы пользователю
+        c.execute("SELECT points FROM promocodes WHERE id = ?", (promo_id,))
+        promo = c.fetchone()
+        points = promo['points']
+        
+        c.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (points, user_id))
+        
+        # Записываем активацию
+        c.execute(
+            "INSERT INTO promo_activations (promo_id, user_id) VALUES (?, ?)",
+            (promo_id, user_id)
+        )
+        
+        # Увеличиваем счетчик использований
+        c.execute(
+            "UPDATE promocodes SET used_count = used_count + 1 WHERE id = ?",
+            (promo_id,)
+        )
+        
+        conn.commit()
+        return True
+    except:
         return False
     finally:
         if conn:
@@ -1721,8 +1974,8 @@ async def referrals(message: Message):
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
 
 @dp.message(F.text == "📂 ПРОЕКТЫ")
-async def projects(message: Message):
-    """Список проектов"""
+async def projects(message: Message, state: FSMContext):
+    """Список проектов с навигацией"""
     user_id = message.from_user.id
     projects_list = get_projects()
     
@@ -1731,18 +1984,125 @@ async def projects(message: Message):
                            reply_markup=get_main_keyboard(user_id))
         return
     
-    text = "🔥 АКТУАЛЬНЫЕ ПАРТНЕРСКИЕ ПРОЕКТЫ\n\n"
-    text += "🎰 Сорви куш вместе с нашими партнерами!\n\n"
+    # Сохраняем список проектов в состоянии
+    await state.update_data(projects=projects_list, current_index=0)
     
+    # Показываем первый проект
+    await show_project(message, state, 0)
+
+async def show_project(message: Message, state: FSMContext, index: int):
+    """Показать проект по индексу"""
+    data = await state.get_data()
+    projects = data.get('projects', [])
+    
+    if not projects or index < 0 or index >= len(projects):
+        await message.answer("❌ Проект не найден")
+        return
+    
+    project = projects[index]
+    
+    # Формируем текст сообщения
+    text = (
+        f"🎰 <b>{project['title']}</b>\n\n"
+        f"📌 <b>Промокод:</b> <code>{project['promo_code']}</code>\n\n"
+        f"🔗 <a href='{project['url']}'>Перейти на сайт</a>"
+    )
+    
+    # Создаем клавиатуру для навигации
     keyboard = InlineKeyboardBuilder()
     
-    for project in projects_list:
-        text += f"{project['title']}\n"
-        text += f"📌 Промокод: {project['promo_code']}\n\n"
-        keyboard.row(InlineKeyboardButton(text=f"🎰 {project['title']}", url=project['url']))
+    # Кнопки навигации
+    nav_row = []
+    if index > 0:
+        nav_row.append(InlineKeyboardButton(text="◀️", callback_data="proj_prev"))
+    if index < len(projects) - 1:
+        nav_row.append(InlineKeyboardButton(text="▶️", callback_data="proj_next"))
+    if nav_row:
+        keyboard.row(*nav_row)
     
-    await message.answer(text, reply_markup=keyboard.as_markup())
-    await message.answer("Выберите действие:", reply_markup=get_main_keyboard(user_id))
+    # Кнопка перехода на сайт
+    keyboard.row(InlineKeyboardButton(text="🎰 Перейти на сайт", url=project['url']))
+    
+    # Информация о текущем проекте
+    keyboard.row(InlineKeyboardButton(
+        text=f"📊 Проект {index + 1} из {len(projects)}", 
+        callback_data="proj_info"
+    ))
+    
+    # Кнопка назад в меню
+    keyboard.row(InlineKeyboardButton(text="◀️ В меню", callback_data="back_to_menu"))
+    
+    # Отправляем сообщение с фото или без
+    if project.get('photo_url'):
+        try:
+            await message.answer_photo(
+                photo=project['photo_url'],
+                caption=text,
+                reply_markup=keyboard.as_markup(),
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            # Если фото не загружается, отправляем без фото
+            logger.error(f"Ошибка при отправке фото: {e}")
+            await message.answer(
+                text,
+                reply_markup=keyboard.as_markup(),
+                parse_mode='HTML'
+            )
+    else:
+        await message.answer(
+            text,
+            reply_markup=keyboard.as_markup(),
+            parse_mode='HTML'
+        )
+    
+    # Обновляем индекс в состоянии
+    await state.update_data(current_index=index)
+
+@dp.callback_query(F.data == "proj_prev")
+async def project_prev(callback: CallbackQuery, state: FSMContext):
+    """Предыдущий проект"""
+    await callback.answer()
+    
+    data = await state.get_data()
+    current_index = data.get('current_index', 0)
+    
+    if current_index > 0:
+        new_index = current_index - 1
+        await show_project(callback.message, state, new_index)
+    else:
+        await callback.answer("Это первый проект", show_alert=True)
+
+@dp.callback_query(F.data == "proj_next")
+async def project_next(callback: CallbackQuery, state: FSMContext):
+    """Следующий проект"""
+    await callback.answer()
+    
+    data = await state.get_data()
+    projects = data.get('projects', [])
+    current_index = data.get('current_index', 0)
+    
+    if current_index < len(projects) - 1:
+        new_index = current_index + 1
+        await show_project(callback.message, state, new_index)
+    else:
+        await callback.answer("Это последний проект", show_alert=True)
+
+@dp.callback_query(F.data == "proj_info")
+async def project_info(callback: CallbackQuery):
+    """Информация о навигации"""
+    await callback.answer("Используйте кнопки ◀️ и ▶️ для переключения", show_alert=False)
+
+@dp.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: CallbackQuery, state: FSMContext):
+    """Возврат в главное меню"""
+    await callback.answer()
+    await state.clear()
+    await callback.message.delete()
+    await callback.message.answer(
+        "Выберите действие:",
+        reply_markup=get_main_keyboard(callback.from_user.id)
+    )
 
 @dp.message(F.text == "📋 ЗАДАНИЯ")
 async def tasks_menu(message: Message):
@@ -2148,7 +2508,7 @@ async def buy_callback(callback: CallbackQuery):
 # ==================== БОНУСЫ ====================
 
 @dp.message(F.text == "🎁 БОНУСЫ")
-async def bonuses_menu(message: Message):
+async def bonuses_menu(message: Message, state: FSMContext):
     """Меню бонусов"""
     user_id = message.from_user.id
     
@@ -2195,10 +2555,16 @@ async def bonuses_menu(message: Message):
             callback_data="claim_free_spin"
         ))
     
-    if not bonus_status["available"] and not spin_status["available"]:
-        text += "✨ Все бонусы на сегодня получены! Возвращайся завтра!"
+    # Новая кнопка для активации промокода
+    kb.row(InlineKeyboardButton(
+        text="🎫 Активировать промокод",
+        callback_data="activate_promo"
+    ))
     
-    await message.answer(text, reply_markup=kb.as_markup() if kb.as_markup().inline_keyboard else None)
+    if not bonus_status["available"] and not spin_status["available"]:
+        text += "✨ Все бонусы на сегодня получены! Возвращайся завтра!\n\n"
+    
+    await message.answer(text, reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data == "claim_daily_bonus")
 async def claim_daily_bonus_callback(callback: CallbackQuery):
@@ -2242,16 +2608,101 @@ async def claim_free_spin_callback(callback: CallbackQuery):
     
     await callback.message.answer("Выберите действие:", reply_markup=get_main_keyboard(user_id))
 
+@dp.callback_query(F.data == "activate_promo")
+async def activate_promo_start(callback: CallbackQuery, state: FSMContext):
+    """Начало активации промокода"""
+    await callback.answer()
+    
+    await callback.message.edit_text(
+        "🎫 Введите промокод:\n\n"
+        "Пример: BONUS100"
+    )
+    await state.set_state("waiting_for_promo_code")
+
+@dp.message(F.text, state="waiting_for_promo_code")
+async def activate_promo_process(message: Message, state: FSMContext):
+    """Обработка введенного промокода"""
+    user_id = message.from_user.id
+    promo_code = message.text.strip()
+    
+    # Проверяем промокод
+    result = check_promocode_available(promo_code, user_id)
+    
+    if not result["success"]:
+        await message.answer(result["message"])
+        await state.clear()
+        return
+    
+    promo = result["promo"]
+    
+    # Спрашиваем подтверждение
+    text = (
+        f"🎫 Найден промокод!\n\n"
+        f"📌 Название: {promo['name']}\n"
+        f"💰 Награда: {promo['points']} баллов\n"
+        f"📊 Осталось активаций: {promo['max_uses'] - promo['used_count']}\n\n"
+        f"Активировать?"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да", callback_data=f"confirm_promo_{promo['id']}"),
+            InlineKeyboardButton(text="❌ Нет", callback_data="cancel_promo")
+        ]
+    ])
+    
+    await message.answer(text, reply_markup=keyboard)
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("confirm_promo_"))
+async def confirm_promo(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение активации промокода"""
+    await callback.answer()
+    
+    promo_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+    
+    # Проверяем еще раз (на случай, если кто-то успел активировать)
+    promo = get_promocode_by_id(promo_id)
+    if not promo:
+        await callback.message.edit_text("❌ Промокод не найден")
+        return
+    
+    result = check_promocode_available(promo['code'], user_id)
+    if not result["success"]:
+        await callback.message.edit_text(result["message"])
+        return
+    
+    # Активируем
+    if activate_promocode(promo_id, user_id):
+        text = (
+            f"✅ Вы успешно активировали промокод!\n\n"
+            f"📌 {promo['name']}\n"
+            f"💰 +{promo['points']} баллов\n\n"
+            f"Новый баланс: {get_user_points(user_id)} баллов"
+        )
+        await callback.message.edit_text(text)
+    else:
+        await callback.message.edit_text("❌ Ошибка при активации промокода")
+
+@dp.callback_query(F.data == "cancel_promo")
+async def cancel_promo(callback: CallbackQuery):
+    """Отмена активации промокода"""
+    await callback.answer()
+    await callback.message.edit_text("❌ Активация отменена")
 # ==================== АДМИН ПАНЕЛЬ ====================
 
 @dp.message(F.text == "⚙️ АДМИН ПАНЕЛЬ")
 async def show_admin_menu(message: Message):
     """Показать меню администратора"""
     notifications_count = get_unread_notifications_count()
+    promocodes = get_all_promocodes(include_inactive=True)
+    active_promos = sum(1 for p in promocodes if p['is_active'])
     
     text = "⚙️ АДМИН ПАНЕЛЬ\n\n"
     if notifications_count > 0:
         text += f"🔔 У вас {notifications_count} новых уведомлений!\n\n"
+    text += f"🎫 Активных промокодов: {active_promos}\n\n"
     text += "Выберите раздел для управления:"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -2262,9 +2713,10 @@ async def show_admin_menu(message: Message):
         [InlineKeyboardButton(text="🎡 Управление колесом", callback_data="admin_wheel")],
         [InlineKeyboardButton(text="📋 Управление заданиями", callback_data="admin_tasks")],
         [InlineKeyboardButton(text="🎰 Управление джекпотом", callback_data="admin_jackpot")],
+        [InlineKeyboardButton(text="🎫 Управление промокодами", callback_data="admin_promocodes")],  # Новая кнопка
+        [InlineKeyboardButton(text="💣 Настройка Mines", callback_data="admin_mines")],
         [InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_mailing")],
         [InlineKeyboardButton(text="💰 Начислить бонусы", callback_data="admin_add_bonus")],
-        [InlineKeyboardButton(text="💣 Настройка Mines", callback_data="admin_mines")],
     ])
     
     await message.answer(text, reply_markup=keyboard)
@@ -2409,8 +2861,9 @@ async def add_project_start(callback: CallbackQuery, state: FSMContext):
     await safe_edit_message(
         callback.message,
         "Введите данные проекта в формате:\n"
-        "Название | Ссылка | Промокод\n\n"
-        "Например: Casino X | https://example.com | XBONUS"
+        "Название | Ссылка | Промокод | Ссылка на фото (необязательно)\n\n"
+        "Пример: Casino X | https://example.com | XBONUS | https://example.com/photo.jpg\n\n"
+        "Фото можно загрузить на сайт типа imgur.com или использовать прямую ссылку"
     )
     await state.set_state(AdminStates.waiting_for_project_data)
 
@@ -2420,12 +2873,16 @@ async def add_project_finish(message: Message, state: FSMContext):
     try:
         parts = [x.strip() for x in message.text.split(" | ")]
         
-        if len(parts) != 3:
-            await message.answer("❌ Ошибка! Нужно 3 части: Название | Ссылка | Промокод")
+        if len(parts) < 3:
+            await message.answer("❌ Ошибка! Нужно минимум 3 части: Название | Ссылка | Промокод")
             return
         
-        title, url, promo = parts
-        project_id = add_project(title, url, promo)
+        title = parts[0]
+        url = parts[1]
+        promo_code = parts[2]
+        photo_url = parts[3] if len(parts) > 3 else None
+        
+        project_id = add_project(title, url, promo_code, photo_url)
         
         if project_id:
             await message.answer(f"✅ Проект успешно добавлен! ID: {project_id}")
@@ -2455,6 +2912,7 @@ async def edit_project_handler(callback: CallbackQuery):
         return
     
     status = "Активен" if project['is_active'] else "Неактивен"
+    photo_info = "✅ Есть фото" if project.get('photo_url') else "❌ Нет фото"
     
     text = (
         f"📂 РЕДАКТИРОВАНИЕ ПРОЕКТА\n\n"
@@ -2462,6 +2920,7 @@ async def edit_project_handler(callback: CallbackQuery):
         f"Название: {project['title']}\n"
         f"URL: {project['url']}\n"
         f"Промокод: {project['promo_code']}\n"
+        f"Фото: {photo_info}\n"
         f"Статус: {status}\n\n"
         f"Выберите действие:"
     )
@@ -2470,6 +2929,7 @@ async def edit_project_handler(callback: CallbackQuery):
         [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"edit_project_title_{project_id}")],
         [InlineKeyboardButton(text="🔗 Изменить URL", callback_data=f"edit_project_url_{project_id}")],
         [InlineKeyboardButton(text="🎫 Изменить промокод", callback_data=f"edit_project_promo_{project_id}")],
+        [InlineKeyboardButton(text="🖼 Изменить фото", callback_data=f"edit_project_photo_{project_id}")],
         [InlineKeyboardButton(text="🔄 Изменить статус", callback_data=f"toggle_project_{project_id}")],
         [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_project_{project_id}")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="edit_projects_list")]
@@ -2513,6 +2973,18 @@ async def edit_project_promo_start(callback: CallbackQuery, state: FSMContext):
     except:
         await safe_edit_message(callback.message, "❌ Ошибка в данных проекта")
 
+@dp.callback_query(F.data.startswith("edit_project_photo_"))
+async def edit_project_photo_start(callback: CallbackQuery, state: FSMContext):
+    """Начало изменения фото проекта"""
+    await callback.answer()
+    try:
+        project_id = int(callback.data.split("_")[3])
+        await state.update_data(project_id=project_id, edit_field="photo")
+        await safe_edit_message(callback.message, "Введите новую ссылку на фото (или 0 чтобы удалить):")
+        await state.set_state(AdminStates.waiting_for_project_edit)
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных проекта")
+
 @dp.message(AdminStates.waiting_for_project_edit)
 async def edit_project_finish(message: Message, state: FSMContext):
     """Сохранение изменений проекта"""
@@ -2528,6 +3000,12 @@ async def edit_project_finish(message: Message, state: FSMContext):
         update_data['url'] = new_value
     elif edit_field == "promo":
         update_data['promo_code'] = new_value
+    elif edit_field == "photo":
+        # Если пользователь ввел 0, удаляем фото
+        if new_value == "0":
+            update_data['photo_url'] = None
+        else:
+            update_data['photo_url'] = new_value
     
     if update_project(project_id, **update_data):
         await message.answer(f"✅ Проект обновлен!")
@@ -3782,6 +4260,417 @@ async def jackpot_history(callback: CallbackQuery):
     ])
     
     await safe_edit_message(callback.message, text, reply_markup=keyboard)
+# ==================== УПРАВЛЕНИЕ ПРОМОКОДАМИ ====================
+
+@dp.callback_query(F.data == "admin_promocodes")
+async def admin_promocodes_menu(callback: CallbackQuery):
+    """Меню управления промокодами"""
+    await callback.answer()
+    
+    promos = get_all_promocodes(include_inactive=True)
+    
+    text = "🎫 УПРАВЛЕНИЕ ПРОМОКОДАМИ\n\n"
+    
+    if not promos:
+        text += "Нет созданных промокодов."
+    else:
+        active = sum(1 for p in promos if p['is_active'])
+        total_uses = sum(p['used_count'] for p in promos)
+        text += f"📊 Статистика:\n"
+        text += f"   • Всего промокодов: {len(promos)}\n"
+        text += f"   • Активных: {active}\n"
+        text += f"   • Всего активаций: {total_uses}\n\n"
+        
+        text += "📋 Последние промокоды:\n"
+        for promo in promos[:5]:
+            status = "✅" if promo['is_active'] else "❌"
+            expires = f" (до {promo['expires_at']})" if promo['expires_at'] else ""
+            text += f"   {status} {promo['code']} - {promo['name']}\n"
+            text += f"      {promo['points']}💰, использовано {promo['used_count']}/{promo['max_uses']}{expires}\n\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.row(InlineKeyboardButton(text="➕ Создать промокод", callback_data="add_promo"))
+    keyboard.row(InlineKeyboardButton(text="✏️ Редактировать промокоды", callback_data="edit_promos_list"))
+    keyboard.row(InlineKeyboardButton(text="📊 История активаций", callback_data="promo_history"))
+    keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin"))
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup())
+
+@dp.callback_query(F.data == "add_promo")
+async def add_promo_start(callback: CallbackQuery, state: FSMContext):
+    """Начало создания промокода"""
+    await callback.answer()
+    await safe_edit_message(
+        callback.message,
+        "Введите название промокода (например: Приветственный бонус):"
+    )
+    await state.set_state(AdminStates.waiting_for_promo_code_name)
+
+@dp.message(AdminStates.waiting_for_promo_code_name)
+async def add_promo_name(message: Message, state: FSMContext):
+    """Получение названия промокода"""
+    await state.update_data(promo_name=message.text)
+    await message.answer("Введите код промокода (например: WELCOME100):")
+    await state.set_state(AdminStates.waiting_for_promo_code_value)
+
+@dp.message(AdminStates.waiting_for_promo_code_value)
+async def add_promo_code(message: Message, state: FSMContext):
+    """Получение кода промокода"""
+    await state.update_data(promo_code=message.text.upper())
+    await message.answer("Введите количество баллов за активацию:")
+    await state.set_state(AdminStates.waiting_for_promo_code_uses)
+
+@dp.message(AdminStates.waiting_for_promo_code_uses)
+async def add_promo_points(message: Message, state: FSMContext):
+    """Получение количества баллов"""
+    try:
+        points = int(message.text)
+        if points <= 0:
+            await message.answer("❌ Количество баллов должно быть больше 0!")
+            return
+        await state.update_data(promo_points=points)
+        await message.answer("Введите максимальное количество активаций:")
+        await state.set_state(AdminStates.waiting_for_promo_code_edit)
+    except ValueError:
+        await message.answer("❌ Введите число!")
+
+@dp.message(AdminStates.waiting_for_promo_code_edit)
+async def add_promo_max_uses(message: Message, state: FSMContext):
+    """Получение максимального количества активаций и создание промокода"""
+    try:
+        max_uses = int(message.text)
+        if max_uses <= 0:
+            await message.answer("❌ Количество активаций должно быть больше 0!")
+            return
+        
+        data = await state.get_data()
+        
+        # Создаем промокод
+        promo_id = add_promocode(
+            code=data['promo_code'],
+            name=data['promo_name'],
+            points=data['promo_points'],
+            max_uses=max_uses
+        )
+        
+        if promo_id:
+            await message.answer(
+                f"✅ Промокод успешно создан!\n\n"
+                f"📌 Название: {data['promo_name']}\n"
+                f"🎫 Код: {data['promo_code']}\n"
+                f"💰 Баллы: {data['promo_points']}\n"
+                f"📊 Макс. активаций: {max_uses}"
+            )
+        else:
+            await message.answer("❌ Промокод с таким кодом уже существует!")
+        
+    except ValueError:
+        await message.answer("❌ Введите число!")
+    finally:
+        await state.clear()
+
+@dp.callback_query(F.data == "edit_promos_list")
+async def edit_promos_list(callback: CallbackQuery):
+    """Список промокодов для редактирования"""
+    await callback.answer()
+    
+    promos = get_all_promocodes(include_inactive=True)
+    
+    text = "🎫 ВЫБЕРИТЕ ПРОМОКОД ДЛЯ РЕДАКТИРОВАНИЯ\n\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    
+    for promo in promos:
+        status = "✅" if promo['is_active'] else "❌"
+        keyboard.row(InlineKeyboardButton(
+            text=f"{status} {promo['code']} - {promo['name']}",
+            callback_data=f"edit_promo_{promo['id']}"
+        ))
+    
+    keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_promocodes"))
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup())
+
+@dp.callback_query(F.data.startswith("edit_promo_"))
+async def edit_promo_menu(callback: CallbackQuery):
+    """Меню редактирования промокода"""
+    await callback.answer()
+    
+    promo_id = int(callback.data.split("_")[2])
+    promo = get_promocode_by_id(promo_id)
+    
+    if not promo:
+        await safe_edit_message(callback.message, "❌ Промокод не найден!")
+        return
+    
+    expires = promo['expires_at'] if promo['expires_at'] else "Бессрочно"
+    status = "Активен" if promo['is_active'] else "Неактивен"
+    
+    text = (
+        f"🎫 РЕДАКТИРОВАНИЕ ПРОМОКОДА\n\n"
+        f"ID: {promo['id']}\n"
+        f"Код: {promo['code']}\n"
+        f"Название: {promo['name']}\n"
+        f"Баллы: {promo['points']}💰\n"
+        f"Активаций: {promo['used_count']}/{promo['max_uses']}\n"
+        f"Срок: {expires}\n"
+        f"Статус: {status}\n\n"
+        f"Выберите действие:"
+    )
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.row(InlineKeyboardButton(text="✏️ Изменить код", callback_data=f"edit_promo_code_{promo_id}"))
+    keyboard.row(InlineKeyboardButton(text="📝 Изменить название", callback_data=f"edit_promo_name_{promo_id}"))
+    keyboard.row(InlineKeyboardButton(text="💰 Изменить баллы", callback_data=f"edit_promo_points_{promo_id}"))
+    keyboard.row(InlineKeyboardButton(text="📊 Изменить лимит", callback_data=f"edit_promo_uses_{promo_id}"))
+    keyboard.row(InlineKeyboardButton(text="🔄 Изменить статус", callback_data=f"toggle_promo_{promo_id}"))
+    keyboard.row(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_promo_{promo_id}"))
+    keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="edit_promos_list"))
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup())
+
+@dp.callback_query(F.data == "promo_history")
+async def promo_history(callback: CallbackQuery):
+    """История активаций промокодов"""
+    await callback.answer()
+    
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT p.code, p.name, pa.user_id, u.username, u.first_name, pa.activated_at
+        FROM promo_activations pa
+        JOIN promocodes p ON pa.promo_id = p.id
+        LEFT JOIN users u ON pa.user_id = u.user_id
+        ORDER BY pa.activated_at DESC
+        LIMIT 20
+    """)
+    activations = [dict(row) for row in c.fetchall()]
+    conn.close()
+    
+    text = "📊 ИСТОРИЯ АКТИВАЦИЙ\n\n"
+    
+    if not activations:
+        text += "Пока нет активаций промокодов."
+    else:
+        for act in activations:
+            user_display = get_user_display(act['user_id'], act['username'], act['first_name'])
+            text += f"• {act['code']} - {act['name']}\n"
+            text += f"  Пользователь: {user_display}\n"
+            text += f"  Время: {act['activated_at'][:16]}\n\n"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_promocodes")]
+    ])
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard)
+
+# ==================== ОБРАБОТЧИКИ ДЛЯ РЕДАКТИРОВАНИЯ ПОЛЕЙ ПРОМОКОДА ====================
+
+@dp.callback_query(F.data.startswith("edit_promo_code_"))
+async def edit_promo_code_start(callback: CallbackQuery, state: FSMContext):
+    """Начало изменения кода промокода"""
+    await callback.answer()
+    try:
+        promo_id = int(callback.data.split("_")[3])
+        await state.update_data(promo_id=promo_id, edit_field="code")
+        await safe_edit_message(callback.message, "Введите новый код промокода:")
+        await state.set_state(AdminStates.waiting_for_promo_code_edit)
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных промокода")
+
+@dp.callback_query(F.data.startswith("edit_promo_name_"))
+async def edit_promo_name_start(callback: CallbackQuery, state: FSMContext):
+    """Начало изменения названия промокода"""
+    await callback.answer()
+    try:
+        promo_id = int(callback.data.split("_")[3])
+        await state.update_data(promo_id=promo_id, edit_field="name")
+        await safe_edit_message(callback.message, "Введите новое название промокода:")
+        await state.set_state(AdminStates.waiting_for_promo_code_edit)
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных промокода")
+
+@dp.callback_query(F.data.startswith("edit_promo_points_"))
+async def edit_promo_points_start(callback: CallbackQuery, state: FSMContext):
+    """Начало изменения количества баллов"""
+    await callback.answer()
+    try:
+        promo_id = int(callback.data.split("_")[3])
+        await state.update_data(promo_id=promo_id, edit_field="points")
+        await safe_edit_message(callback.message, "Введите новое количество баллов:")
+        await state.set_state(AdminStates.waiting_for_promo_code_edit)
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных промокода")
+
+@dp.callback_query(F.data.startswith("edit_promo_uses_"))
+async def edit_promo_uses_start(callback: CallbackQuery, state: FSMContext):
+    """Начало изменения лимита активаций"""
+    await callback.answer()
+    try:
+        promo_id = int(callback.data.split("_")[3])
+        await state.update_data(promo_id=promo_id, edit_field="max_uses")
+        await safe_edit_message(callback.message, "Введите новый лимит активаций:")
+        await state.set_state(AdminStates.waiting_for_promo_code_edit)
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных промокода")
+
+@dp.message(AdminStates.waiting_for_promo_code_edit)
+async def edit_promo_finish(message: Message, state: FSMContext):
+    """Сохранение изменений промокода"""
+    data = await state.get_data()
+    promo_id = data['promo_id']
+    edit_field = data['edit_field']
+    new_value = message.text.strip()
+    
+    update_data = {}
+    
+    if edit_field == "code":
+        # Проверяем, не занят ли код
+        existing = get_promocode_by_code(new_value.upper())
+        if existing and existing['id'] != promo_id:
+            await message.answer("❌ Промокод с таким кодом уже существует!")
+            return
+        update_data['code'] = new_value.upper()
+    
+    elif edit_field == "name":
+        update_data['name'] = new_value
+    
+    elif edit_field == "points":
+        try:
+            points = int(new_value)
+            if points <= 0:
+                await message.answer("❌ Количество баллов должно быть больше 0!")
+                return
+            update_data['points'] = points
+        except ValueError:
+            await message.answer("❌ Введите число!")
+            return
+    
+    elif edit_field == "max_uses":
+        try:
+            max_uses = int(new_value)
+            if max_uses <= 0:
+                await message.answer("❌ Лимит активаций должен быть больше 0!")
+                return
+            
+            # Проверяем, не меньше ли новый лимит уже использованных
+            promo = get_promocode_by_id(promo_id)
+            if promo and max_uses < promo['used_count']:
+                await message.answer(f"❌ Нельзя установить лимит меньше уже использованных ({promo['used_count']})!")
+                return
+            
+            update_data['max_uses'] = max_uses
+        except ValueError:
+            await message.answer("❌ Введите число!")
+            return
+    
+    if update_data:
+        if update_promocode(promo_id, **update_data):
+            # Получаем обновленный промокод для красивого сообщения
+            promo = get_promocode_by_id(promo_id)
+            await message.answer(
+                f"✅ Промокод обновлен!\n\n"
+                f"📌 Новые данные:\n"
+                f"Код: {promo['code']}\n"
+                f"Название: {promo['name']}\n"
+                f"Баллы: {promo['points']}💰\n"
+                f"Лимит: {promo['max_uses']}"
+            )
+            await asyncio.sleep(1)
+            
+            # Возвращаемся к меню промокода
+            fake_callback = type('obj', (object,), {
+                'message': message,
+                'answer': lambda: None,
+                'data': f"edit_promo_{promo_id}"
+            })
+            await edit_promo_menu(fake_callback)
+        else:
+            await message.answer("❌ Ошибка при обновлении промокода")
+    else:
+        await message.answer("❌ Нет данных для обновления")
+    
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("toggle_promo_"))
+async def toggle_promo_handler(callback: CallbackQuery):
+    """Изменение статуса промокода"""
+    await callback.answer()
+    
+    try:
+        promo_id = int(callback.data.split("_")[2])
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных промокода")
+        return
+    
+    promo = get_promocode_by_id(promo_id)
+    
+    if promo:
+        update_promocode(promo_id, is_active=not promo['is_active'])
+        new_status = "активирован" if not promo['is_active'] else "деактивирован"
+        await safe_edit_message(callback.message, f"✅ Промокод {new_status}!")
+        await asyncio.sleep(1)
+        await edit_promo_menu(callback)
+    else:
+        await safe_edit_message(callback.message, "❌ Промокод не найден!")
+
+@dp.callback_query(F.data.startswith("delete_promo_"))
+async def delete_promo_confirm(callback: CallbackQuery):
+    """Подтверждение удаления промокода"""
+    await callback.answer()
+    
+    try:
+        promo_id = int(callback.data.split("_")[2])
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных промокода")
+        return
+    
+    # Проверяем, были ли активации
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) as count FROM promo_activations WHERE promo_id = ?", (promo_id,))
+    activations = c.fetchone()['count']
+    conn.close()
+    
+    warning = ""
+    if activations > 0:
+        warning = f"\n\n⚠️ У этого промокода {activations} активаций! История активаций также будет удалена."
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_promo_{promo_id}")],
+        [InlineKeyboardButton(text="❌ Нет, отмена", callback_data=f"edit_promo_{promo_id}")]
+    ])
+    
+    await safe_edit_message(
+        callback.message,
+        f"⚠️ Вы уверены, что хотите удалить этот промокод?{warning}\nЭто действие нельзя отменить!",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query(F.data.startswith("confirm_delete_promo_"))
+async def confirm_delete_promo(callback: CallbackQuery):
+    """Подтвержденное удаление промокода"""
+    await callback.answer()
+    
+    try:
+        promo_id = int(callback.data.split("_")[3])
+    except:
+        await safe_edit_message(callback.message, "❌ Ошибка в данных промокода")
+        return
+    
+    if delete_promocode(promo_id):
+        await safe_edit_message(callback.message, "✅ Промокод успешно удален!")
+        await asyncio.sleep(1)
+        await admin_promocodes_menu(callback)
+    else:
+        await safe_edit_message(callback.message, "❌ Ошибка при удалении промокода")
+
+# Добавляем обработчик для возврата к списку промокодов
+@dp.callback_query(F.data == "back_to_promos")
+async def back_to_promos(callback: CallbackQuery):
+    """Возврат к списку промокодов"""
+    await callback.answer()
+    await admin_promocodes_menu(callback)
 # ==================== ИГРА MINES ====================
 
 @dp.message(F.text == "💣 MINES")
@@ -4380,13 +5269,16 @@ async def handle_unknown_callback(callback: CallbackQuery):
 
 
 async def main():
-    init_db()  # Создает таблицы, если их нет
-    migrate_db()  # Добавляет недостающие колонки
+    init_db()
+    migrate_db()
+    migrate_projects_table()
+    migrate_promocodes_table()  # Добавить эту строку
     print("✅ Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
