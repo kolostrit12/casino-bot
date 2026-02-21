@@ -84,6 +84,22 @@ def get_user_display(user_id: int, username: str = None, first_name: str = None)
     else:
         return f"ID: {user_id}"
 
+# ==================== ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ССЫЛОК IMGUR ====================
+# ВСТАВЬТЕ СЮДА ↓↓↓
+def convert_imgur_url(url: str) -> str:
+    """Конвертирует Imgur URL в прямую ссылку на изображение"""
+    if 'imgur.com' in url:
+        # Извлекаем ID изображения
+        if 'i.imgur.com' not in url:
+            # Формат: https://imgur.com/XXXXXXX
+            img_id = url.split('/')[-1].split('?')[0]
+            return f"https://i.imgur.com/{img_id}.jpg"
+        else:
+            # Уже прямая ссылка, но может быть без расширения
+            if not url.endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                return url + '.jpg'
+    return url
+# ↑↑↑ ВСТАВЬТЕ СЮДА
 # ==================== СОСТОЯНИЯ FSM ====================
 class AdminStates(StatesGroup):
     waiting_for_password = State()
@@ -2129,38 +2145,40 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
                     photo=project['photo_url'],
                     caption=text,
                     reply_markup=keyboard.as_markup(),
-                    parse_mode='HTML'
+                    parse_mode='HTML',
+                    disable_web_page_preview=True  # Добавлено!
                 )
             except Exception as e:
                 logger.error(f"Ошибка при отправке фото: {e}")
                 await message.answer(
                     text,
                     reply_markup=keyboard.as_markup(),
-                    parse_mode='HTML'
+                    parse_mode='HTML',
+                    disable_web_page_preview=True  # Добавлено!
                 )
         else:
             await message.answer(
                 text,
                 reply_markup=keyboard.as_markup(),
-                parse_mode='HTML'
+                parse_mode='HTML',
+                disable_web_page_preview=True  # Добавлено!
             )
     else:
         # Редактируем существующее сообщение
         if project.get('photo_url'):
             try:
-                # Для фото нужно использовать edit_message_caption
                 await message.edit_caption(
                     caption=text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML'
                 )
             except Exception as e:
-                # Если не получается отредактировать caption, пробуем edit_text
                 try:
                     await message.edit_text(
                         text,
                         reply_markup=keyboard.as_markup(),
-                        parse_mode='HTML'
+                        parse_mode='HTML',
+                        disable_web_page_preview=True  # Добавлено!
                     )
                 except Exception as e2:
                     logger.error(f"Ошибка при редактировании: {e2}")
@@ -2168,7 +2186,8 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
             await message.edit_text(
                 text,
                 reply_markup=keyboard.as_markup(),
-                parse_mode='HTML'
+                parse_mode='HTML',
+                disable_web_page_preview=True  # Добавлено!
             )
     
     # Обновляем индекс в состоянии
@@ -3037,8 +3056,8 @@ async def add_project_start(callback: CallbackQuery, state: FSMContext):
         callback.message,
         "Введите данные проекта в формате:\n"
         "Название | Ссылка | Промокод | Ссылка на фото (необязательно)\n\n"
-        "Пример: Casino X | https://example.com | XBONUS | https://example.com/photo.jpg\n\n"
-        "Фото можно загрузить на сайт типа imgur.com или использовать прямую ссылку"
+        "Пример: Casino X | https://example.com | XBONUS | https://i.imgur.com/XXXXXXX.jpg\n\n"
+        "Для Imgur используйте прямую ссылку вида https://i.imgur.com/XXXXXXX.jpg"
     )
     await state.set_state(AdminStates.waiting_for_project_data)
 
@@ -3153,11 +3172,25 @@ async def edit_project_photo_start(callback: CallbackQuery, state: FSMContext):
     """Начало изменения фото проекта"""
     await callback.answer()
     try:
-        project_id = int(callback.data.split("_")[3])
+        # Правильное разбиение: edit_project_photo_ID
+        parts = callback.data.split("_")
+        # parts = ['edit', 'project', 'photo', 'ID']
+        if len(parts) >= 4:
+            project_id = int(parts[3])
+        else:
+            await safe_edit_message(callback.message, "❌ Неверный формат данных")
+            return
+            
         await state.update_data(project_id=project_id, edit_field="photo")
-        await safe_edit_message(callback.message, "Введите новую ссылку на фото (или 0 чтобы удалить):")
+        await safe_edit_message(
+            callback.message, 
+            "Введите новую ссылку на фото (или 0 чтобы удалить):\n\n"
+            "Для Imgur используйте прямую ссылку вида:\n"
+            "https://i.imgur.com/XXXXXXX.jpg"
+        )
         await state.set_state(AdminStates.waiting_for_project_edit)
-    except:
+    except Exception as e:
+        logger.error(f"Ошибка в edit_project_photo_start: {e}")
         await safe_edit_message(callback.message, "❌ Ошибка в данных проекта")
 
 @dp.message(AdminStates.waiting_for_project_edit)
@@ -3179,20 +3212,27 @@ async def edit_project_finish(message: Message, state: FSMContext):
         # Если пользователь ввел 0, удаляем фото
         if new_value == "0":
             update_data['photo_url'] = None
+            await message.answer("✅ Фото удалено")
         else:
-            update_data['photo_url'] = new_value
+            # Конвертируем ссылку Imgur в прямой формат
+            converted_url = convert_imgur_url(new_value)
+            update_data['photo_url'] = converted_url
+            await message.answer(f"✅ Фото добавлено: {converted_url}")
     
-    if update_project(project_id, **update_data):
-        await message.answer(f"✅ Проект обновлен!")
-        await asyncio.sleep(1)
-        fake_callback = type('obj', (object,), {
-            'message': message,
-            'answer': lambda: None,
-            'data': f"edit_project_{project_id}"
-        })
-        await edit_project_handler(fake_callback)
+    if update_data:
+        if update_project(project_id, **update_data):
+            await message.answer(f"✅ Проект обновлен!")
+            await asyncio.sleep(1)
+            fake_callback = type('obj', (object,), {
+                'message': message,
+                'answer': lambda: None,
+                'data': f"edit_project_{project_id}"
+            })
+            await edit_project_handler(fake_callback)
+        else:
+            await message.answer("❌ Ошибка при обновлении проекта")
     else:
-        await message.answer("❌ Ошибка при обновлении проекта")
+        await message.answer("❌ Нет данных для обновления")
     
     await state.clear()
 
@@ -5763,6 +5803,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
