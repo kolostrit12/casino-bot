@@ -84,8 +84,7 @@ def get_user_display(user_id: int, username: str = None, first_name: str = None)
     else:
         return f"ID: {user_id}"
 
-# ==================== ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ССЫЛОК IMGUR ====================
-# ВСТАВЬТЕ СЮДА ↓↓↓
+ # ==================== ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ССЫЛОК IMGUR ====================
 def convert_imgur_url(url: str) -> str:
     """Конвертирует Imgur URL в прямую ссылку на изображение"""
     if not url or url == "0":
@@ -2177,7 +2176,7 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
             except Exception as e:
                 logger.error(f"Ошибка при отправке фото: {e}")
                 await message.answer(
-                    text + f"\n\n⚠️ Ошибка загрузки фото",
+                    text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
                     disable_web_page_preview=True
@@ -2202,7 +2201,6 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
                     )
                 else:
                     # Если это текстовое сообщение, но нужно показать фото
-                    # Удаляем старое и отправляем новое с фото
                     await message.delete()
                     await message.answer_photo(
                         photo=photo_url,
@@ -2215,7 +2213,7 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
                 logger.error(f"Ошибка при редактировании фото: {e}")
                 try:
                     await message.edit_text(
-                        text + f"\n\n⚠️ Ошибка загрузки фото",
+                        text,
                         reply_markup=keyboard.as_markup(),
                         parse_mode='HTML',
                         disable_web_page_preview=True
@@ -3215,7 +3213,6 @@ async def edit_project_promo_start(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("edit_project_photo_"))
 async def edit_project_photo_start(callback: CallbackQuery, state: FSMContext):
-     print(f"🔥 Сработал edit_project_photo_start с data: {callback.data}")  # ВРЕМЕННАЯ ОТЛАДКА
     """Начало изменения фото проекта"""
     await callback.answer()
     try:
@@ -3309,6 +3306,8 @@ async def edit_project_finish(message: Message, state: FSMContext):
         if update_project(project_id, **update_data):
             await message.answer(f"✅ Проект обновлен!")
             await asyncio.sleep(1)
+            
+            # Создаем фейковый callback для возврата в меню проекта
             fake_callback = type('obj', (object,), {
                 'message': message,
                 'answer': lambda: None,
@@ -5889,6 +5888,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
