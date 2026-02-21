@@ -2155,7 +2155,7 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
     # Кнопка назад в меню
     keyboard.row(InlineKeyboardButton(text="◀️ В меню", callback_data="back_to_menu"))
     
-    # Обновляем индекс в состоянии
+    # Обновляем индекс в состоянии (ЭТО НУЖНО ЗДЕСЬ, ДО ОТПРАВКИ)
     await state.update_data(current_index=index)
     
     # Проверяем, есть ли фото
@@ -2250,11 +2250,6 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
-            except Exception as e:
-                logger.error(f"Ошибка при редактировании текста: {e}")
-    
-    # Обновляем индекс в состоянии
-    await state.update_data(current_index=index)
 
 @dp.callback_query(F.data == "proj_prev")
 async def project_prev(callback: CallbackQuery, state: FSMContext):
@@ -5918,6 +5913,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
