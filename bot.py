@@ -2558,7 +2558,7 @@ async def spin_wheel_callback(callback: CallbackQuery):
         await safe_edit_message(callback.message, "❌ Произошла ошибка при вращении колеса. Попробуйте еще раз.")
 
 @dp.message(F.text == "🏪 МАГАЗИН")
-async def shop(message: Message):
+async def shop(message: Message, state: FSMContext):
     """Магазин промокодов (сгруппированный)"""
     user_id = message.from_user.id
     items = get_shop_items()
@@ -2573,7 +2573,7 @@ async def shop(message: Message):
     
     keyboard = InlineKeyboardBuilder()
     
-    for item in items:
+    for idx, item in enumerate(items):
         available = item.get('available', item.get('quantity', 1))
         text += f"📦 <b>{item['name']}</b>\n"
         text += f"💰 Цена: {item['price']} баллов\n"
@@ -2582,28 +2582,56 @@ async def shop(message: Message):
             text += f"🏢 Проект: {item['project_title']}\n"
         text += "\n"
         
+        # Используем индекс вместо названия для callback_data
         keyboard.row(InlineKeyboardButton(
-            text=f"🛒 Купить {item['name']} | {item['price']}💰",
-            callback_data=f"buy_group_{item['name']}_{item['price']}"
+            text=f"🛒 Купить {item['name'][:20]}... | {item['price']}💰",
+            callback_data=f"buy_{idx}_{item['price']}"
         ))
+    
+    # Сохраняем список товаров в состоянии для последующего использования
+    await state.update_data(shop_items=items)
     
     await message.answer(text, reply_markup=keyboard.as_markup(), parse_mode='HTML')
     await message.answer("Выберите действие:", reply_markup=get_main_keyboard(user_id))
 
-@dp.callback_query(F.data.startswith("buy_group_"))
-async def buy_group_callback(callback: CallbackQuery):
-    """Покупка товара из группы"""
+@dp.callback_query(F.data.startswith("buy_") & F.data.regex(r"^buy_\d+_\d+$"))
+async def buy_group_callback(callback: CallbackQuery, state: FSMContext):
+    """Покупка товара из группы (новый формат с индексом)"""
     await callback.answer()
     
-    # Парсим данные: buy_group_Название_Цена
-    parts = callback.data.split("_")
-    # Склеиваем название обратно (может содержать пробелы)
-    price = int(parts[-1])
-    name = "_".join(parts[2:-1]).replace("_", " ")
+    try:
+        # Формат: buy_ИНДЕКС_ЦЕНА
+        parts = callback.data.split("_")
+        idx = int(parts[1])
+        price = int(parts[2])
+        
+        # Получаем сохраненный список товаров
+        data = await state.get_data()
+        items = data.get('shop_items', [])
+        
+        if not items:
+            # Если нет в состоянии, пробуем получить из базы
+            items = get_shop_items()
+            if idx >= len(items):
+                await callback.message.edit_text("❌ Товар не найден")
+                return
+            item = items[idx]
+        else:
+            if idx >= len(items):
+                await callback.message.edit_text("❌ Товар не найден")
+                return
+            item = items[idx]
+        
+        name = item['name']
+        
+    except Exception as e:
+        logger.error(f"Ошибка парсинга callback: {e}")
+        await callback.message.edit_text("❌ Ошибка при обработке запроса")
+        return
     
     user_id = callback.from_user.id
     
-    success, result, item = buy_shop_item(user_id, name, price)
+    success, result, purchased_item = buy_shop_item(user_id, name, price)
     
     if success:
         # Проверяем, сколько осталось
@@ -2616,19 +2644,25 @@ async def buy_group_callback(callback: CallbackQuery):
         
         text = f"✅ Покупка успешна!\n\n🎫 Твой промокод:\n{result}"
         
-        if item and item.get('project_url'):
-            text += f"\n\n🔗 Ссылка на проект: {item['project_url']}"
+        if purchased_item and purchased_item.get('project_url'):
+            text += f"\n\n🔗 Ссылка на проект: {purchased_item['project_url']}"
         
         if remaining > 0:
             text += f"\n\n📊 Осталось товара: {remaining} шт."
         else:
             text += f"\n\n⚠️ Это был последний экземпляр!"
         
-        await safe_edit_message(callback.message, text)
+        await callback.message.edit_text(text)
     else:
-        await safe_edit_message(callback.message, f"❌ {result}")
+        await callback.message.edit_text(f"❌ {result}")
     
     await callback.message.answer("Выберите действие:", reply_markup=get_main_keyboard(user_id))
+
+@dp.callback_query(F.data.startswith("buy_"))
+async def buy_fallback_callback(callback: CallbackQuery):
+    """Универсальный обработчик для любых других форматов buy_"""
+    await callback.answer("❌ Неверный формат данных", show_alert=True)
+    logger.warning(f"Неизвестный формат buy_: {callback.data}")
 # ==================== БОНУСЫ ====================
 
 @dp.message(F.text == "🎁 БОНУСЫ")
@@ -5706,12 +5740,13 @@ async def main():
     migrate_db()
     migrate_projects_table()
     migrate_promocodes_table()
-    migrate_shop_table()  # Добавить эту строку
+    migrate_shop_table()  # ЭТА СТРОКА ДОЛЖНА БЫТЬ
     print("✅ Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
