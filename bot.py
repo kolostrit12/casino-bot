@@ -21,7 +21,12 @@ from aiogram.types import (
     InlineKeyboardButton, CallbackQuery, Message, FSInputFile, BufferedInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-
+# ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 # 2. ПОТОМ настройки (BOT_TOKEN, ADMIN_IDS и т.д.)
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 if not BOT_TOKEN:
@@ -5746,6 +5751,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
