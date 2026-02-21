@@ -2190,17 +2190,21 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
             )
     else:
         # Редактируем существующее сообщение
-        if photo_url:
-            try:
-                # Проверяем, есть ли у сообщения caption (значит это сообщение с фото)
-                if hasattr(message, 'caption') and message.caption is not None:
+        try:
+            # Проверяем, является ли текущее сообщение фото
+            is_photo_message = hasattr(message, 'photo') and message.photo is not None
+            
+            if photo_url:
+                # Если есть новое фото
+                if is_photo_message:
+                    # Если текущее сообщение с фото - редактируем caption
                     await message.edit_caption(
                         caption=text,
                         reply_markup=keyboard.as_markup(),
                         parse_mode='HTML'
                     )
                 else:
-                    # Если это текстовое сообщение, но нужно показать фото
+                    # Если текущее сообщение текстовое - удаляем и создаем новое с фото
                     await message.delete()
                     await message.answer_photo(
                         photo=photo_url,
@@ -2209,21 +2213,38 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
                         parse_mode='HTML',
                         disable_web_page_preview=True
                     )
-            except Exception as e:
-                logger.error(f"Ошибка при редактировании фото: {e}")
-                try:
+            else:
+                # Если нет фото
+                if is_photo_message:
+                    # Если текущее сообщение с фото - удаляем и создаем текстовое
+                    await message.delete()
+                    await message.answer(
+                        text,
+                        reply_markup=keyboard.as_markup(),
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                else:
+                    # Если текущее сообщение текстовое - просто редактируем текст
                     await message.edit_text(
                         text,
                         reply_markup=keyboard.as_markup(),
                         parse_mode='HTML',
                         disable_web_page_preview=True
                     )
-                except Exception as e2:
-                    logger.error(f"Ошибка при редактировании текста: {e2}")
-        else:
-            # Просто текстовое сообщение без фото
-            try:
-                await message.edit_text(
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
+            # В крайнем случае отправляем новое сообщение
+            if photo_url:
+                await message.answer_photo(
+                    photo=photo_url,
+                    caption=text,
+                    reply_markup=keyboard.as_markup(),
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+            else:
+                await message.answer(
                     text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
@@ -2276,7 +2297,14 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
     """Возврат в главное меню"""
     await callback.answer()
     await state.clear()
-    await callback.message.delete()
+    
+    # Удаляем текущее сообщение
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.error(f"Ошибка при удалении сообщения: {e}")
+    
+    # Отправляем новое с главной клавиатурой
     await callback.message.answer(
         "Выберите действие:",
         reply_markup=get_main_keyboard(callback.from_user.id)
@@ -3224,45 +3252,43 @@ async def edit_project_photo_start(callback: CallbackQuery, state: FSMContext):
         # Разбираем callback_data: edit_project_photo_ID
         data_parts = callback.data.split("_")
         
-        # Выводим отладку в логи
+        # Логируем для отладки
         logger.info(f"edit_project_photo_start: data={callback.data}, parts={data_parts}")
         
-        # Проверяем, что у нас достаточно частей
-        if len(data_parts) < 4:
-            logger.error(f"Недостаточно частей в callback_data: {callback.data}")
-            await safe_edit_message(callback.message, "❌ Неверный формат данных (мало частей)")
+        # Проверяем формат данных
+        if len(data_parts) != 4:
+            logger.error(f"Неверный формат callback_data: {callback.data}")
+            await safe_edit_message(callback.message, "❌ Неверный формат данных")
             return
         
-        # ID проекта находится на последней позиции
-        # Формат: edit_project_photo_18 -> части: ['edit', 'project', 'photo', '18']
+        # Получаем ID проекта (последняя часть)
         try:
-            project_id = int(data_parts[-1])  # Берем последний элемент
-        except ValueError as e:
-            logger.error(f"Не удалось преобразовать ID: {data_parts[-1]}, ошибка: {e}")
+            project_id = int(data_parts[3])
+        except ValueError:
+            logger.error(f"Не удалось преобразовать ID: {data_parts[3]}")
             await safe_edit_message(callback.message, "❌ Неверный ID проекта")
             return
         
-        # Сохраняем данные в состоянии
+        # Сохраняем в состоянии
         await state.update_data(project_id=project_id, edit_field="photo")
         
-        # Отправляем сообщение с инструкцией
+        # Отправляем инструкцию
         await safe_edit_message(
-            callback.message, 
+            callback.message,
             "📸 <b>Изменение фото проекта</b>\n\n"
             "Введите новую ссылку на фото (или 0 чтобы удалить):\n\n"
-            "✅ <b>Рекомендуемые хостинги (работают в РФ):</b>\n"
-            "• <b>Telegra.ph</b> - https://telegra.ph/file/xxx.jpg\n"
-            "• <b>Postimages</b> - https://i.postimg.cc/xxx.jpg\n"
-            "• <b>ImgBB</b> - https://ibb.co/xxx\n"
-            "• <b>Ваш собственный хостинг</b>\n\n"
-            "❌ <b>Imgur НЕ РАБОТАЕТ</b> в России и многих странах\n\n"
-            "Для Telegra.ph: загрузите фото в @Telegraph_bot и скопируйте ссылку",
+            "✅ <b>Как получить ссылку:</b>\n"
+            "1. Зайдите на https://postimages.org\n"
+            "2. Загрузите фото\n"
+            "3. Выберите 'Direct link'\n"
+            "4. Вставьте ссылку сюда\n\n"
+            "Пример: https://i.postimg.cc/xyz123/photo.jpg",
             parse_mode='HTML'
         )
         await state.set_state(AdminStates.waiting_for_project_edit)
         
     except Exception as e:
-        logger.error(f"Неизвестная ошибка в edit_project_photo_start: {e}")
+        logger.error(f"Ошибка в edit_project_photo_start: {e}")
         await safe_edit_message(callback.message, f"❌ Ошибка: {str(e)}")
 
 @dp.message(AdminStates.waiting_for_project_edit)
@@ -5892,6 +5918,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
