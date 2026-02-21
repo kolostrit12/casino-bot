@@ -451,6 +451,34 @@ def migrate_promocodes_table():
     finally:
         if conn:
             conn.close()
+
+def migrate_shop_table():
+    """Миграция таблицы shop_promocodes - добавление поля quantity"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Проверяем, есть ли колонка quantity
+        c.execute("PRAGMA table_info(shop_promocodes)")
+        columns = [col['name'] for col in c.fetchall()]
+        
+        if 'quantity' not in columns:
+            c.execute("ALTER TABLE shop_promocodes ADD COLUMN quantity INTEGER DEFAULT 1")
+            print("✅ Добавлена колонка quantity в shop_promocodes")
+        
+        if 'total_quantity' not in columns:
+            c.execute("ALTER TABLE shop_promocodes ADD COLUMN total_quantity INTEGER DEFAULT 1")
+            print("✅ Добавлена колонка total_quantity в shop_promocodes")
+        
+        conn.commit()
+        print("✅ Миграция таблицы магазина завершена")
+        
+    except Exception as e:
+        print(f"❌ Ошибка при миграции shop: {e}")
+    finally:
+        if conn:
+            conn.close()
 # ==================== ФУНКЦИИ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ====================
 
 @retry_on_locked()
@@ -1081,7 +1109,41 @@ def complete_task(user_id: int, task_id: int) -> bool:
 
 @retry_on_locked()
 def get_shop_items(include_used: bool = False) -> List:
-    """Получить список товаров в магазине"""
+    """Получить список товаров в магазине (группировка по названию)"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Получаем уникальные товары с суммой доступного количества
+        c.execute("""
+            SELECT 
+                MIN(id) as id,
+                name, 
+                price, 
+                MIN(promo_code) as promo_code,
+                project_id,
+                MIN(project_title) as project_title,
+                MIN(project_url) as project_url,
+                COUNT(*) as quantity,
+                SUM(CASE WHEN is_used = 0 THEN 1 ELSE 0 END) as available
+            FROM (
+                SELECT s.*, p.title as project_title, p.url as project_url 
+                FROM shop_promocodes s
+                LEFT JOIN projects p ON s.project_id = p.id
+            )
+            GROUP BY name, price, project_id
+            HAVING available > 0
+            ORDER BY price
+        """)
+        return [dict(row) for row in c.fetchall()]
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def get_all_shop_items_detailed(include_used: bool = False) -> List:
+    """Получить детальный список всех товаров (для админки)"""
     conn = None
     try:
         conn = get_db()
@@ -1091,7 +1153,7 @@ def get_shop_items(include_used: bool = False) -> List:
                 SELECT s.*, p.title as project_title, p.url as project_url 
                 FROM shop_promocodes s
                 LEFT JOIN projects p ON s.project_id = p.id
-                ORDER BY s.id
+                ORDER BY s.name, s.id
             """)
         else:
             c.execute("""
@@ -1099,7 +1161,7 @@ def get_shop_items(include_used: bool = False) -> List:
                 FROM shop_promocodes s
                 LEFT JOIN projects p ON s.project_id = p.id
                 WHERE s.is_used = 0 
-                ORDER BY s.price
+                ORDER BY s.name, s.price
             """)
         return [dict(row) for row in c.fetchall()]
     finally:
@@ -1108,7 +1170,7 @@ def get_shop_items(include_used: bool = False) -> List:
 
 @retry_on_locked()
 def get_shop_item_by_id(item_id: int):
-    """Получить товар по ID"""
+    """Получить конкретный экземпляр товара по ID"""
     conn = None
     try:
         conn = get_db()
@@ -1126,82 +1188,48 @@ def get_shop_item_by_id(item_id: int):
             conn.close()
 
 @retry_on_locked()
-def add_shop_item(name: str, price: int, promo_code: str, project_id: int = None):
-    """Добавить товар в магазин"""
+def add_shop_items(name: str, price: int, promo_codes: List[str], project_id: int = None):
+    """Добавить несколько экземпляров товара"""
     conn = None
     try:
         conn = get_db()
         c = conn.cursor()
-        c.execute(
-            "INSERT INTO shop_promocodes (name, price, promo_code, project_id) VALUES (?, ?, ?, ?)",
-            (name, price, promo_code, project_id)
-        )
+        added = 0
+        
+        for promo_code in promo_codes:
+            c.execute(
+                "INSERT INTO shop_promocodes (name, price, promo_code, project_id) VALUES (?, ?, ?, ?)",
+                (name, price, promo_code.strip(), project_id)
+            )
+            added += 1
+        
         conn.commit()
-        return c.lastrowid
+        return added
     finally:
         if conn:
             conn.close()
 
 @retry_on_locked()
-def update_shop_item(item_id: int, **kwargs):
-    """Обновить товар в магазине"""
+def buy_shop_item(user_id: int, item_name: str, price: int) -> Tuple[bool, str, dict]:
+    """Купить один экземпляр товара (выбирает первый доступный)"""
     conn = None
     try:
         conn = get_db()
         c = conn.cursor()
         
-        allowed_fields = ['name', 'price', 'promo_code', 'project_id', 'is_used', 'buyer_id', 'bought_at']
-        updates = []
-        params = []
-        
-        for field, value in kwargs.items():
-            if field in allowed_fields:
-                updates.append(f"{field} = ?")
-                params.append(value)
-        
-        if not updates:
-            return False
-        
-        params.append(item_id)
-        c.execute(f"UPDATE shop_promocodes SET {', '.join(updates)} WHERE id = ?", params)
-        conn.commit()
-        return c.rowcount > 0
-    finally:
-        if conn:
-            conn.close()
-
-@retry_on_locked()
-def delete_shop_item(item_id: int):
-    """Удалить товар из магазина"""
-    conn = None
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("DELETE FROM shop_promocodes WHERE id = ?", (item_id,))
-        conn.commit()
-        return c.rowcount > 0
-    finally:
-        if conn:
-            conn.close()
-
-@retry_on_locked()
-def buy_shop_item(user_id: int, item_id: int) -> Tuple[bool, str, dict]:
-    """Купить товар в магазине"""
-    conn = None
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        
+        # Находим первый доступный экземпляр такого товара
         c.execute("""
             SELECT s.*, p.title as project_title, p.url as project_url 
             FROM shop_promocodes s
             LEFT JOIN projects p ON s.project_id = p.id
-            WHERE s.id = ? AND s.is_used = 0
-        """, (item_id,))
+            WHERE s.name = ? AND s.price = ? AND s.is_used = 0
+            ORDER BY s.id
+            LIMIT 1
+        """, (item_name, price))
         item_row = c.fetchone()
         
         if not item_row:
-            return False, "Товар не найден или уже куплен", None
+            return False, "Товар не найден или закончился", None
         
         item = dict(item_row)
         
@@ -1219,7 +1247,7 @@ def buy_shop_item(user_id: int, item_id: int) -> Tuple[bool, str, dict]:
         c.execute("UPDATE users SET points = points - ? WHERE user_id = ?", (item['price'], user_id))
         c.execute(
             "UPDATE shop_promocodes SET is_used = 1, buyer_id = ?, bought_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (user_id, item_id)
+            (user_id, item['id'])
         )
         
         conn.commit()
@@ -1975,7 +2003,7 @@ async def referrals(message: Message):
 
 @dp.message(F.text == "📂 ПРОЕКТЫ")
 async def projects(message: Message, state: FSMContext):
-    """Список проектов с навигацией"""
+    """Список проектов с навигацией (в одном сообщении)"""
     user_id = message.from_user.id
     projects_list = get_projects()
     
@@ -1988,10 +2016,10 @@ async def projects(message: Message, state: FSMContext):
     await state.update_data(projects=projects_list, current_index=0)
     
     # Показываем первый проект
-    await show_project(message, state, 0)
+    await show_project(message, state, 0, is_new_message=True)
 
-async def show_project(message: Message, state: FSMContext, index: int):
-    """Показать проект по индексу"""
+async def show_project(message: Message, state: FSMContext, index: int, is_new_message: bool = False):
+    """Показать проект по индексу (с редактированием существующего сообщения)"""
     data = await state.get_data()
     projects = data.get('projects', [])
     
@@ -2032,36 +2060,66 @@ async def show_project(message: Message, state: FSMContext, index: int):
     # Кнопка назад в меню
     keyboard.row(InlineKeyboardButton(text="◀️ В меню", callback_data="back_to_menu"))
     
-    # Отправляем сообщение с фото или без
-    if project.get('photo_url'):
-        try:
-            await message.answer_photo(
-                photo=project['photo_url'],
-                caption=text,
-                reply_markup=keyboard.as_markup(),
-                parse_mode='HTML'
-            )
-        except Exception as e:
-            # Если фото не загружается, отправляем без фото
-            logger.error(f"Ошибка при отправке фото: {e}")
+    # Обновляем индекс в состоянии
+    await state.update_data(current_index=index)
+    
+    # Отправляем или редактируем сообщение
+    if is_new_message:
+        # Первый проект - отправляем новое сообщение
+        if project.get('photo_url'):
+            try:
+                await message.answer_photo(
+                    photo=project['photo_url'],
+                    caption=text,
+                    reply_markup=keyboard.as_markup(),
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                logger.error(f"Ошибка при отправке фото: {e}")
+                await message.answer(
+                    text,
+                    reply_markup=keyboard.as_markup(),
+                    parse_mode='HTML'
+                )
+        else:
             await message.answer(
                 text,
                 reply_markup=keyboard.as_markup(),
                 parse_mode='HTML'
             )
     else:
-        await message.answer(
-            text,
-            reply_markup=keyboard.as_markup(),
-            parse_mode='HTML'
-        )
+        # Редактируем существующее сообщение
+        if project.get('photo_url'):
+            try:
+                # Для фото нужно использовать edit_message_caption
+                await message.edit_caption(
+                    caption=text,
+                    reply_markup=keyboard.as_markup(),
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                # Если не получается отредактировать caption, пробуем edit_text
+                try:
+                    await message.edit_text(
+                        text,
+                        reply_markup=keyboard.as_markup(),
+                        parse_mode='HTML'
+                    )
+                except Exception as e2:
+                    logger.error(f"Ошибка при редактировании: {e2}")
+        else:
+            await message.edit_text(
+                text,
+                reply_markup=keyboard.as_markup(),
+                parse_mode='HTML'
+            )
     
     # Обновляем индекс в состоянии
     await state.update_data(current_index=index)
 
 @dp.callback_query(F.data == "proj_prev")
 async def project_prev(callback: CallbackQuery, state: FSMContext):
-    """Предыдущий проект"""
+    """Предыдущий проект (редактируем текущее сообщение)"""
     await callback.answer()
     
     data = await state.get_data()
@@ -2069,13 +2127,13 @@ async def project_prev(callback: CallbackQuery, state: FSMContext):
     
     if current_index > 0:
         new_index = current_index - 1
-        await show_project(callback.message, state, new_index)
+        await show_project(callback.message, state, new_index, is_new_message=False)
     else:
         await callback.answer("Это первый проект", show_alert=True)
 
 @dp.callback_query(F.data == "proj_next")
 async def project_next(callback: CallbackQuery, state: FSMContext):
-    """Следующий проект"""
+    """Следующий проект (редактируем текущее сообщение)"""
     await callback.answer()
     
     data = await state.get_data()
@@ -2084,7 +2142,7 @@ async def project_next(callback: CallbackQuery, state: FSMContext):
     
     if current_index < len(projects) - 1:
         new_index = current_index + 1
-        await show_project(callback.message, state, new_index)
+        await show_project(callback.message, state, new_index, is_new_message=False)
     else:
         await callback.answer("Это последний проект", show_alert=True)
 
@@ -2460,7 +2518,7 @@ async def spin_wheel_callback(callback: CallbackQuery):
 
 @dp.message(F.text == "🏪 МАГАЗИН")
 async def shop(message: Message):
-    """Магазин промокодов"""
+    """Магазин промокодов (сгруппированный)"""
     user_id = message.from_user.id
     items = get_shop_items()
     
@@ -2475,36 +2533,61 @@ async def shop(message: Message):
     keyboard = InlineKeyboardBuilder()
     
     for item in items:
+        available = item.get('available', item.get('quantity', 1))
+        text += f"📦 <b>{item['name']}</b>\n"
+        text += f"💰 Цена: {item['price']} баллов\n"
+        text += f"📊 В наличии: {available} шт.\n"
+        if item.get('project_title'):
+            text += f"🏢 Проект: {item['project_title']}\n"
+        text += "\n"
+        
         keyboard.row(InlineKeyboardButton(
-            text=f"{item['name']} | {item['price']}💰",
-            callback_data=f"buy_{item['id']}"
+            text=f"🛒 Купить {item['name']} | {item['price']}💰",
+            callback_data=f"buy_group_{item['name']}_{item['price']}"
         ))
     
-    await message.answer(text, reply_markup=keyboard.as_markup())
+    await message.answer(text, reply_markup=keyboard.as_markup(), parse_mode='HTML')
     await message.answer("Выберите действие:", reply_markup=get_main_keyboard(user_id))
 
-@dp.callback_query(F.data.startswith("buy_"))
-async def buy_callback(callback: CallbackQuery):
-    """Покупка промокода"""
+@dp.callback_query(F.data.startswith("buy_group_"))
+async def buy_group_callback(callback: CallbackQuery):
+    """Покупка товара из группы"""
     await callback.answer()
     
-    item_id = int(callback.data.split("_")[1])
+    # Парсим данные: buy_group_Название_Цена
+    parts = callback.data.split("_")
+    # Склеиваем название обратно (может содержать пробелы)
+    price = int(parts[-1])
+    name = "_".join(parts[2:-1]).replace("_", " ")
+    
     user_id = callback.from_user.id
     
-    success, result, item = buy_shop_item(user_id, item_id)
+    success, result, item = buy_shop_item(user_id, name, price)
     
     if success:
+        # Проверяем, сколько осталось
+        items_left = get_shop_items()
+        remaining = 0
+        for it in items_left:
+            if it['name'] == name and it['price'] == price:
+                remaining = it.get('available', it.get('quantity', 0))
+                break
+        
         text = f"✅ Покупка успешна!\n\n🎫 Твой промокод:\n{result}"
         
         if item and item.get('project_url'):
             text += f"\n\n🔗 Ссылка на проект: {item['project_url']}"
+        
+        if remaining > 0:
+            text += f"\n\n📊 Осталось товара: {remaining} шт."
+        else:
+            text += f"\n\n⚠️ Это был последний экземпляр!"
         
         await safe_edit_message(callback.message, text)
     else:
         await safe_edit_message(callback.message, f"❌ {result}")
     
     await callback.message.answer("Выберите действие:", reply_markup=get_main_keyboard(user_id))
-
 # ==================== БОНУСЫ ====================
 
 @dp.message(F.text == "🎁 БОНУСЫ")
@@ -3090,61 +3173,48 @@ async def admin_shop_menu(callback: CallbackQuery):
     """Управление магазином"""
     await callback.answer()
     
-    items = get_shop_items(include_used=True)
+    items = get_all_shop_items_detailed(include_used=True)
+    
+    # Группируем для статистики
+    from collections import defaultdict
+    stats = defaultdict(lambda: {"total": 0, "sold": 0, "available": 0})
+    
+    for item in items:
+        key = (item['name'], item['price'])
+        stats[key]["total"] += 1
+        if item['is_used']:
+            stats[key]["sold"] += 1
+        else:
+            stats[key]["available"] += 1
     
     text = "🏪 УПРАВЛЕНИЕ МАГАЗИНОМ\n\n"
     
     if not items:
         text += "Нет товаров в магазине."
     else:
-        available = sum(1 for i in items if not i['is_used'])
-        sold = sum(1 for i in items if i['is_used'])
-        text += f"📊 Статистика:\n"
-        text += f"   • Всего товаров: {len(items)}\n"
-        text += f"   • Доступно: {available}\n"
-        text += f"   • Продано: {sold}\n\n"
+        text += f"📊 Общая статистика:\n"
+        text += f"   • Всего экземпляров: {len(items)}\n"
+        text += f"   • Уникальных товаров: {len(stats)}\n\n"
         
-        text += "📋 Последние товары:\n"
-        for item in items[:5]:
-            status = "✅" if not item['is_used'] else "💰"
-            buyer = f" (куплен ID: {item['buyer_id']})" if item['buyer_id'] else ""
-            project_info = f" [Проект: {item['project_title']}]" if item.get('project_title') else ""
-            text += f"   {status} {item['name']} - {item['price']}💰{project_info}{buyer}\n"
+        text += "📋 Товары:\n"
+        for (name, price), data in stats.items():
+            text += f"   • {name} - {price}💰\n"
+            text += f"     Всего: {data['total']}, "
+            text += f"Доступно: {data['available']}, "
+            text += f"Продано: {data['sold']}\n\n"
     
     keyboard = InlineKeyboardBuilder()
-    keyboard.row(InlineKeyboardButton(text="➕ Добавить товар", callback_data="add_shop_item"))
-    keyboard.row(InlineKeyboardButton(text="✏️ Редактировать товары", callback_data="edit_shop_list"))
+    keyboard.row(InlineKeyboardButton(text="➕ Добавить товары", callback_data="add_shop_items"))
+    keyboard.row(InlineKeyboardButton(text="✏️ Управление экземплярами", callback_data="edit_shop_list"))
     keyboard.row(InlineKeyboardButton(text="📊 История покупок", callback_data="shop_purchase_history"))
     keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin"))
     
     await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup())
 
-@dp.callback_query(F.data == "edit_shop_list")
-async def edit_shop_list(callback: CallbackQuery):
-    """Список товаров для редактирования"""
-    await callback.answer()
-    
-    items = get_shop_items(include_used=True)
-    
-    text = "🏪 ВЫБЕРИТЕ ТОВАР ДЛЯ РЕДАКТИРОВАНИЯ\n\n"
-    
-    keyboard = InlineKeyboardBuilder()
-    
-    for item in items:
-        status = "✅" if not item['is_used'] else "💰"
-        project_info = f" [{item['project_title']}]" if item.get('project_title') else ""
-        keyboard.row(InlineKeyboardButton(
-            text=f"{status} {item['name']}{project_info} | {item['price']}💰",
-            callback_data=f"edit_shop_item_{item['id']}"
-        ))
-    
-    keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_shop"))
-    
-    await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup())
 
-@dp.callback_query(F.data == "add_shop_item")
-async def add_shop_item_start(callback: CallbackQuery, state: FSMContext):
-    """Начало добавления товара"""
+@dp.callback_query(F.data == "add_shop_items")
+async def add_shop_items_start(callback: CallbackQuery, state: FSMContext):
+    """Начало добавления нескольких товаров"""
     await callback.answer()
     
     projects = get_projects()
@@ -3152,36 +3222,57 @@ async def add_shop_item_start(callback: CallbackQuery, state: FSMContext):
     
     await safe_edit_message(
         callback.message,
-        f"Введите данные товара в формате:\n"
-        f"Название | Цена | Промокод | ID проекта (необязательно)\n\n"
+        f"Введите данные товаров в формате:\n"
+        f"Название | Цена | ID проекта (необязательно)\n"
+        f"Затем на новой строке список промокодов (каждый с новой строки)\n\n"
         f"Доступные проекты:\n{projects_text if projects else 'Нет проектов'}\n\n"
-        f"Пример: Промокод Starda на 500₽ | 1000 | STARDA500 | 1\n"
-        f"Если проект не нужен, укажите 0"
+        f"Пример:\n"
+        f"Промокод Starda на 500₽ | 1000 | 1\n"
+        f"STARDA500\n"
+        f"STARDA501\n"
+        f"STARDA502"
     )
     await state.set_state(AdminStates.waiting_for_promo_data)
 
 @dp.message(AdminStates.waiting_for_promo_data)
-async def add_shop_item_finish(message: Message, state: FSMContext):
-    """Сохранение товара"""
+async def add_shop_items_finish(message: Message, state: FSMContext):
+    """Сохранение нескольких товаров"""
     try:
-        parts = [x.strip() for x in message.text.split(" | ")]
+        lines = message.text.strip().split('\n')
+        if len(lines) < 2:
+            await message.answer("❌ Ошибка! Нужно указать параметры товара и хотя бы один промокод")
+            return
         
-        if len(parts) < 3:
-            await message.answer("❌ Ошибка! Нужно минимум 3 части: Название | Цена | Промокод")
+        # Первая строка: Название | Цена | ID проекта
+        first_line = lines[0].strip()
+        parts = [x.strip() for x in first_line.split(" | ")]
+        
+        if len(parts) < 2:
+            await message.answer("❌ Ошибка! Первая строка должна содержать: Название | Цена | ID проекта (необязательно)")
             return
         
         name = parts[0]
         price = int(parts[1])
-        promo_code = parts[2]
-        project_id = int(parts[3]) if len(parts) > 3 and parts[3] != '0' else None
+        project_id = int(parts[2]) if len(parts) > 2 and parts[2] != '0' else None
         
-        item_id = add_shop_item(name, price, promo_code, project_id)
+        # Остальные строки - промокоды
+        promo_codes = [line.strip() for line in lines[1:] if line.strip()]
         
-        if item_id:
-            await message.answer(f"✅ Товар успешно добавлен! ID: {item_id}")
-        else:
-            await message.answer("❌ Ошибка при добавлении товара")
-            
+        if not promo_codes:
+            await message.answer("❌ Ошибка! Нужно указать хотя бы один промокод")
+            return
+        
+        added = add_shop_items(name, price, promo_codes, project_id)
+        
+        await message.answer(
+            f"✅ Успешно добавлено!\n\n"
+            f"📦 Товар: {name}\n"
+            f"💰 Цена: {price} баллов\n"
+            f"📊 Добавлено экземпляров: {added}"
+        )
+        
+    except ValueError as e:
+        await message.answer(f"❌ Ошибка в формате числа: {e}")
     except Exception as e:
         await message.answer(f"❌ Ошибка! {str(e)}")
     
@@ -3200,7 +3291,7 @@ async def shop_purchase_history(callback: CallbackQuery):
             LEFT JOIN users u ON s.buyer_id = u.user_id
             WHERE s.is_used = 1
             ORDER BY s.bought_at DESC
-            LIMIT 20
+            LIMIT 50
         """)
         purchases = [dict(row) for row in c.fetchall()]
     
@@ -3209,11 +3300,18 @@ async def shop_purchase_history(callback: CallbackQuery):
     if not purchases:
         text += "Пока нет совершенных покупок."
     else:
+        # Группируем по датам для удобства
+        current_date = ""
         for p in purchases:
+            date_str = p['bought_at'][:10] if p['bought_at'] else "Неизвестно"
+            if date_str != current_date:
+                current_date = date_str
+                text += f"\n📅 {current_date}\n"
+            
             buyer_display = get_user_display(p['buyer_id'], p['username'], p['first_name'])
-            text += f"• {p['name']} - {p['price']}💰\n"
-            text += f"  Покупатель: {buyer_display}\n"
-            text += f"  Время: {p['bought_at'][:16] if p['bought_at'] else 'Неизвестно'}\n\n"
+            text += f"   • {p['name']} - {p['price']}💰\n"
+            text += f"     Покупатель: {buyer_display}\n"
+            text += f"     Время: {p['bought_at'][11:16] if p['bought_at'] else '--:--'}\n"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_shop")]
@@ -5272,12 +5370,14 @@ async def main():
     init_db()
     migrate_db()
     migrate_projects_table()
-    migrate_promocodes_table()  # Добавить эту строку
+    migrate_promocodes_table()
+    migrate_shop_table()  # Добавить эту строку
     print("✅ Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
