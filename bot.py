@@ -91,11 +91,11 @@ def convert_imgur_url(url: str) -> str:
     
     # Если это уже прямая ссылка с расширением
     if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
-        return url
+        return str(url)  # гарантируем строку
     
     # Telegraph ссылки
     if 'telegra.ph' in url:
-        return url
+        return str(url)
     
     # Postimages
     if 'postimg.cc' in url or 'postimages.org' in url:
@@ -127,7 +127,7 @@ def convert_imgur_url(url: str) -> str:
         if 'i.postimg.cc' in url:
             parts = url.split('/')
             if len(parts) >= 4 and parts[-1]:  # есть что-то после последнего слеша
-                return url
+                return str(url)
             else:
                 logger.warning(f"❌ Неполная прямая ссылка i.postimg.cc: {url}")
                 return None
@@ -139,16 +139,19 @@ def convert_imgur_url(url: str) -> str:
             converted = url.replace('ibb.co', 'i.ibb.co') + '.jpg'
             logger.info(f"✅ Преобразована ссылка ImgBB: {url} -> {converted}")
             return converted
-        return url
+        return str(url)
     
     # Если это ссылка на Imgur, показываем предупреждение
     if 'imgur.com' in url:
         logger.warning(f"⚠️ Попытка использовать Imgur (не работает в РФ): {url}")
-        return None  # Возвращаем None, чтобы не использовать неработающие ссылки
+        return None
     
     # Если это другая ссылка, просто возвращаем как есть
-    logger.info(f"✅ Используется ссылка: {url}")
-    return url
+    if url:  # проверяем, что url не пустой
+        logger.info(f"✅ Используется ссылка: {url}")
+        return str(url)
+    
+    return None
  # ==================== СОСТОЯНИЯ FSM ====================
 class AdminStates(StatesGroup):
     waiting_for_password = State()
@@ -1388,7 +1391,6 @@ def buy_shop_item(user_id: int, item_name: str, price: int) -> Tuple[bool, str, 
         if conn:
             conn.close()
 # ==================== ФУНКЦИИ ДЛЯ ПРОЕКТОВ ====================
-
 @retry_on_locked()
 def get_projects(include_inactive: bool = False) -> List:
     """Получить список проектов"""
@@ -1402,13 +1404,26 @@ def get_projects(include_inactive: bool = False) -> List:
             c.execute("SELECT * FROM projects WHERE is_active = 1 ORDER BY id")
         results = c.fetchall()
         
-        # ОТЛАДКА
-        print(f"\n🔍 get_projects() вернула {len(results)} проектов:")
+        # Преобразуем в список словарей и проверяем photo_url
+        projects = []
         for row in results:
-            photo = row['photo_url'] if row['photo_url'] else "НЕТ"
-            print(f"   ID: {row['id']}, Название: {row['title'][:20]}, Фото: {photo[:30] if photo != 'НЕТ' else photo}")
+            project = dict(row)
+            # Убеждаемся, что photo_url не None, а строка или None
+            if project.get('photo_url') is None:
+                project['photo_url'] = None
+            projects.append(project)
         
-        return [dict(row) for row in results]
+        # ОТЛАДКА
+        print(f"\n🔍 get_projects() вернула {len(projects)} проектов:")
+        for p in projects:
+            photo = p.get('photo_url')
+            if photo:
+                photo_display = photo[:50] + "..." if len(photo) > 50 else photo
+            else:
+                photo_display = "НЕТ"
+            print(f"   ID: {p['id']}, Название: {p['title'][:20]}, Фото: {photo_display}")
+        
+        return projects
     finally:
         if conn:
             conn.close()
@@ -2164,8 +2179,13 @@ async def projects(message: Message, state: FSMContext):
     # ОТЛАДКА
     print(f"\n🔍 ЗАГРУЗКА ПРОЕКТОВ ИЗ БД:")
     for p in projects_list:
-        photo = p.get('photo_url', 'НЕТ')
-        print(f"   ID: {p['id']}, Название: {p['title']}, Фото: {photo[:50] if photo != 'НЕТ' else photo}")
+        photo = p.get('photo_url')
+        if photo:
+            # Если фото есть, показываем первые 50 символов
+            photo_display = photo[:50] + "..." if len(photo) > 50 else photo
+        else:
+            photo_display = "НЕТ"
+        print(f"   ID: {p['id']}, Название: {p['title']}, Фото: {photo_display}")
     
     if not projects_list:
         await message.answer("📂 ПРОЕКТЫ\n\nК сожалению, сейчас нет активных проектов.", 
@@ -2177,6 +2197,7 @@ async def projects(message: Message, state: FSMContext):
     
     # Показываем первый проект
     await show_project(message, state, 0, is_new_message=True)
+
 
 async def show_project(message: Message, state: FSMContext, index: int, is_new_message: bool = False):
     """Показать проект по индексу (с редактированием существующего сообщения)"""
@@ -2196,15 +2217,21 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
     # ОТЛАДКА
     print(f"\n🔍 ПОКАЗ ПРОЕКТА индекс={index}")
     for i, p in enumerate(projects):
-        photo = p.get('photo_url', 'НЕТ')
-        print(f"   Проект {i}: ID={p['id']}, title={p['title']}, фото={photo[:50] if photo != 'НЕТ' else photo}")
+        photo = p.get('photo_url')
+        if photo:
+            photo_display = photo[:50] + "..." if len(photo) > 50 else photo
+        else:
+            photo_display = "НЕТ"
+        print(f"   Проект {i}: ID={p['id']}, title={p['title']}, фото={photo_display}")
     
     if not projects or index < 0 or index >= len(projects):
         await message.answer("❌ Проект не найден")
         return
     
     project = projects[index]
-    print(f"🔍 ВЫБРАН проект {index}: ID={project['id']}, фото={project.get('photo_url', 'НЕТ')}")
+    current_photo = project.get('photo_url')
+    photo_display = current_photo[:50] + "..." if current_photo and len(current_photo) > 50 else (current_photo or "НЕТ")
+    print(f"🔍 ВЫБРАН проект {index}: ID={project['id']}, фото={photo_display}")
     
     # Формируем текст сообщения
     text = (
@@ -6002,6 +6029,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
