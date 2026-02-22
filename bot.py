@@ -5190,14 +5190,38 @@ async def back_to_pending_list(callback: CallbackQuery):
     """Возврат к списку ожидающих заявок"""
     await callback.answer()
     
-    # Создаем фейковый callback для вызова check_pending_submissions
-    fake_callback = type('obj', (object,), {
-        'message': callback.message,
-        'from_user': callback.from_user,
-        'answer': lambda *args, **kwargs: None,
-        'data': "check_pending_submissions"
-    })
-    await check_pending_submissions(fake_callback)
+    # Получаем свежий список заявок
+    pending = get_pending_submissions()
+    
+    if not pending:
+        await safe_edit_message(
+            callback.message,
+            "📸 ЗАЯВКИ НА ПРОВЕРКУ\n\nНет ожидающих проверки заявок.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_verification_tasks")]
+            ])
+        )
+        return
+    
+    text = "📸 <b>ЗАЯВКИ НА ПРОВЕРКУ</b>\n\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    
+    for sub in pending:
+        user_display = get_user_display(sub['user_id'], sub['username'], sub['first_name'])
+        text += f"📋 <b>Заявка #{sub['id']}</b>\n"
+        text += f"👤 Пользователь: {user_display}\n"
+        text += f"📌 Задание: {sub['task_name']}\n"
+        text += f"⏰ Отправлено: {sub['submitted_at'][:16]}\n\n"
+        
+        keyboard.row(InlineKeyboardButton(
+            text=f"📋 Рассмотреть заявку #{sub['id']}",
+            callback_data=f"review_submission_{sub['id']}"
+        ))
+    
+    keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_verification_tasks"))
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup(), parse_mode='HTML')
 @dp.callback_query(F.data == "add_verification_task")
 async def add_verification_task_start(callback: CallbackQuery, state: FSMContext):
     """Начало добавления задания с проверкой"""
@@ -7345,6 +7369,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
