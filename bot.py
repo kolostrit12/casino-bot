@@ -2267,77 +2267,102 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
     # Обновляем индекс в состоянии
     await state.update_data(current_index=index)
     
-    # Проверяем, есть ли фото
-    photo_url = project.get('photo_url')
-    
-    # Функция для отправки текстового сообщения (без фото)
-    async def send_text_only():
-        if is_new_message:
-            await message.answer(
-                text,
-                reply_markup=keyboard.as_markup(),
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-        else:
+    # ЕСЛИ ЭТО НОВОЕ СООБЩЕНИЕ (первый вход в раздел)
+    if is_new_message:
+        if current_photo:
             try:
-                await message.edit_text(
-                    text,
+                await message.answer_photo(
+                    photo=current_photo,
+                    caption=text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
+                return
             except Exception as e:
-                logger.error(f"Ошибка при редактировании текста: {e}")
+                logger.error(f"Ошибка при отправке фото: {e}")
+                # Если фото не отправилось, отправляем текст
                 await message.answer(
                     text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
+                return
+        else:
+            await message.answer(
+                text,
+                reply_markup=keyboard.as_markup(),
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+            return
     
-    # Если есть фото, пробуем его отправить
-    if photo_url:
-        try:
-            if is_new_message:
+    # ЕСЛИ ЭТО РЕДАКТИРОВАНИЕ СУЩЕСТВУЮЩЕГО СООБЩЕНИЯ
+    try:
+        # Проверяем, есть ли у сообщения фото
+        is_photo_message = hasattr(message, 'photo') and message.photo is not None
+        
+        if current_photo:
+            # Если у проекта есть фото
+            if is_photo_message:
+                # Текущее сообщение с фото - редактируем caption
+                await message.edit_caption(
+                    caption=text,
+                    reply_markup=keyboard.as_markup(),
+                    parse_mode='HTML'
+                )
+            else:
+                # Текущее сообщение без фото - удаляем и создаем новое с фото
+                await message.delete()
                 await message.answer_photo(
-                    photo=photo_url,
+                    photo=current_photo,
                     caption=text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
+        else:
+            # Если у проекта нет фото
+            if is_photo_message:
+                # Текущее сообщение с фото - удаляем и создаем текстовое
+                await message.delete()
+                await message.answer(
+                    text,
+                    reply_markup=keyboard.as_markup(),
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
             else:
-                # Проверяем, является ли текущее сообщение фото
-                is_photo_message = hasattr(message, 'photo') and message.photo is not None
-                
-                if is_photo_message:
-                    await message.edit_caption(
-                        caption=text,
-                        reply_markup=keyboard.as_markup(),
-                        parse_mode='HTML'
-                    )
-                else:
-                    # Пробуем отправить новое фото
-                    await message.delete()
-                    await message.answer_photo(
-                        photo=photo_url,
-                        caption=text,
-                        reply_markup=keyboard.as_markup(),
-                        parse_mode='HTML',
-                        disable_web_page_preview=True
-                    )
-        except Exception as e:
-            logger.error(f"Ошибка при отправке фото: {e}")
-            # Если не получилось отправить фото, отправляем только текст
-            await send_text_only()
-    else:
-        # Если нет фото, отправляем только текст
-        await send_text_only()
+                # Текущее сообщение без фото - редактируем текст
+                await message.edit_text(
+                    text,
+                    reply_markup=keyboard.as_markup(),
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+    except Exception as e:
+        logger.error(f"Ошибка при редактировании сообщения: {e}")
+        # В случае ошибки отправляем новое сообщение
+        if current_photo:
+            await message.answer_photo(
+                photo=current_photo,
+                caption=text,
+                reply_markup=keyboard.as_markup(),
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+        else:
+            await message.answer(
+                text,
+                reply_markup=keyboard.as_markup(),
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
 
 @dp.callback_query(F.data == "proj_prev")
 async def project_prev(callback: CallbackQuery, state: FSMContext):
-    """Предыдущий проект (редактируем текущее сообщение)"""
+    """Предыдущий проект"""
     await callback.answer()
     
     data = await state.get_data()
@@ -2347,7 +2372,6 @@ async def project_prev(callback: CallbackQuery, state: FSMContext):
     fresh_projects = get_projects()
     if fresh_projects:
         await state.update_data(projects=fresh_projects)
-        print(f"🔍 ПЕРЕД ПРЕДЫДУЩИМ: проекты обновлены из БД")
     
     if current_index > 0:
         new_index = current_index - 1
@@ -2357,7 +2381,7 @@ async def project_prev(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "proj_next")
 async def project_next(callback: CallbackQuery, state: FSMContext):
-    """Следующий проект (редактируем текущее сообщение)"""
+    """Следующий проект"""
     await callback.answer()
     
     data = await state.get_data()
@@ -2369,7 +2393,6 @@ async def project_next(callback: CallbackQuery, state: FSMContext):
     if fresh_projects:
         await state.update_data(projects=fresh_projects)
         projects = fresh_projects
-        print(f"🔍 ПЕРЕД СЛЕДУЮЩИМ: проекты обновлены из БД")
     
     if current_index < len(projects) - 1:
         new_index = current_index + 1
@@ -2399,7 +2422,7 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
         "Выберите действие:",
         reply_markup=get_main_keyboard(callback.from_user.id)
     )
-
+    
 @dp.message(F.text == "📋 ЗАДАНИЯ")
 async def tasks_menu(message: Message):
     """Список заданий"""
@@ -6029,6 +6052,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
