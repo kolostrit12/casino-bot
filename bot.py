@@ -99,28 +99,55 @@ def convert_imgur_url(url: str) -> str:
     
     # Postimages
     if 'postimg.cc' in url or 'postimages.org' in url:
+        # Проверяем, не является ли ссылка неполной
+        if url.endswith('/'):
+            logger.warning(f"❌ Неполная ссылка postimages (заканчивается на /): {url}")
+            return None
+        
         # Преобразуем в прямую ссылку если нужно
         if 'i.postimg.cc' not in url:
-            # Извлекаем ID
             import re
-            match = re.search(r'/([^/]+)$', url)
+            # Ищем ID в ссылке
+            match = re.search(r'/([a-zA-Z0-9]+)/?$', url.rstrip('/'))
             if match:
-                return f"https://i.postimg.cc/{match.group(1)}"
-        return url
+                image_id = match.group(1)
+                # Проверяем, что ID не пустой и имеет нормальную длину
+                if len(image_id) > 3:
+                    direct_url = f"https://i.postimg.cc/{image_id}"
+                    logger.info(f"✅ Преобразована ссылка postimages: {url} -> {direct_url}")
+                    return direct_url
+                else:
+                    logger.warning(f"❌ Слишком короткий ID в ссылке: {url}")
+                    return None
+            else:
+                logger.warning(f"❌ Не удалось извлечь ID из ссылки: {url}")
+                return None
+        
+        # Если это уже i.postimg.cc, проверяем, есть ли ID
+        if 'i.postimg.cc' in url:
+            parts = url.split('/')
+            if len(parts) >= 4 and parts[-1]:  # есть что-то после последнего слеша
+                return url
+            else:
+                logger.warning(f"❌ Неполная прямая ссылка i.postimg.cc: {url}")
+                return None
     
     # ImgBB
     if 'ibb.co' in url:
         if 'i.ibb.co' not in url:
             # Преобразуем в прямую ссылку
-            return url.replace('ibb.co', 'i.ibb.co') + '.jpg'
+            converted = url.replace('ibb.co', 'i.ibb.co') + '.jpg'
+            logger.info(f"✅ Преобразована ссылка ImgBB: {url} -> {converted}")
+            return converted
         return url
     
     # Если это ссылка на Imgur, показываем предупреждение
     if 'imgur.com' in url:
-        logger.warning(f"Попытка использовать Imgur: {url}")
-        return url  # Пробуем, но скорее всего не сработает
+        logger.warning(f"⚠️ Попытка использовать Imgur (не работает в РФ): {url}")
+        return None  # Возвращаем None, чтобы не использовать неработающие ссылки
     
     # Если это другая ссылка, просто возвращаем как есть
+    logger.info(f"✅ Используется ссылка: {url}")
     return url
  # ==================== СОСТОЯНИЯ FSM ====================
 class AdminStates(StatesGroup):
@@ -5967,6 +5994,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
