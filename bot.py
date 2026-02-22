@@ -175,6 +175,15 @@ class AdminStates(StatesGroup):
     waiting_for_promo_code_value = State()     # Количество баллов
     waiting_for_promo_code_uses = State()      # Количество активаций
     waiting_for_promo_code_edit = State()      # Редактирование промокода
+    waiting_for_task_with_verification = State()  # Создание задания с проверкой
+    waiting_for_task_project_id = State()         # Выбор проекта для задания
+    waiting_for_task_promo_code = State()         # Промокод для задания
+    waiting_for_task_reward_points = State()      # Награда баллами
+    waiting_for_task_reward_spins = State()       # Награда попытками
+    waiting_for_task_instructions = State()       # Инструкция для задания
+# ==================== СОСТОЯНИЯ ДЛЯ ЗАДАНИЙ С ПРОВЕРКОЙ ====================
+class TaskVerificationStates(StatesGroup):
+    waiting_for_photo = State()  # Ожидание фото/видео подтверждения
     
 # ==================== СОСТОЯНИЯ ДЛЯ ИГРЫ MINES ====================
 class MinesStates(StatesGroup):
@@ -258,7 +267,7 @@ def init_db():
         except sqlite3.OperationalError:
             pass
         
-        # Таблица заданий
+        # Таблица заданий (обычные)
         c.execute('''CREATE TABLE IF NOT EXISTS tasks
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       task_name TEXT,
@@ -270,7 +279,7 @@ def init_db():
                       is_active BOOLEAN DEFAULT 1,
                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         
-        # Таблица выполненных заданий
+        # Таблица выполненных заданий (обычные)
         c.execute('''CREATE TABLE IF NOT EXISTS completed_tasks
                      (user_id INTEGER,
                       task_id INTEGER,
@@ -297,12 +306,25 @@ def init_db():
         except sqlite3.OperationalError:
             pass
         
+        try:
+            c.execute("ALTER TABLE shop_promocodes ADD COLUMN quantity INTEGER DEFAULT 1")
+            print("✅ Добавлена колонка quantity в shop_promocodes")
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            c.execute("ALTER TABLE shop_promocodes ADD COLUMN total_quantity INTEGER DEFAULT 1")
+            print("✅ Добавлена колонка total_quantity в shop_promocodes")
+        except sqlite3.OperationalError:
+            pass
+        
         # Таблица проектов
         c.execute('''CREATE TABLE IF NOT EXISTS projects
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       title TEXT,
                       url TEXT,
                       promo_code TEXT,
+                      photo_url TEXT DEFAULT NULL,
                       is_active BOOLEAN DEFAULT 1,
                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         
@@ -349,6 +371,80 @@ def init_db():
         
         # Добавляем запись в mines_settings, если её нет
         c.execute("INSERT OR IGNORE INTO mines_settings (id, default_mines) VALUES (1, 3)")
+        
+        # Таблица промокодов (для бонусов)
+        c.execute('''CREATE TABLE IF NOT EXISTS promocodes
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      code TEXT UNIQUE,
+                      name TEXT,
+                      points INTEGER,
+                      max_uses INTEGER,
+                      used_count INTEGER DEFAULT 0,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      expires_at DATE DEFAULT NULL,
+                      is_active BOOLEAN DEFAULT 1)''')
+        
+        # Таблица активаций промокодов
+        c.execute('''CREATE TABLE IF NOT EXISTS promo_activations
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      promo_id INTEGER,
+                      user_id INTEGER,
+                      activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY (promo_id) REFERENCES promocodes (id),
+                      FOREIGN KEY (user_id) REFERENCES users (user_id),
+                      UNIQUE(promo_id, user_id))''')
+        
+        # ===== НОВЫЕ ТАБЛИЦЫ ДЛЯ ЗАДАНИЙ С ПРОВЕРКОЙ =====
+        
+        # Таблица заданий с проверкой
+        c.execute('''CREATE TABLE IF NOT EXISTS verification_tasks
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      task_name TEXT,
+                      description TEXT,
+                      instructions TEXT,
+                      project_id INTEGER,
+                      project_url TEXT,
+                      promo_code TEXT,
+                      reward_points INTEGER DEFAULT 0,
+                      reward_spins INTEGER DEFAULT 0,
+                      is_active BOOLEAN DEFAULT 1,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY (project_id) REFERENCES projects (id))''')
+        
+        # Таблица заявок на проверку
+        c.execute('''CREATE TABLE IF NOT EXISTS task_submissions
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      task_id INTEGER,
+                      user_id INTEGER,
+                      project_id INTEGER,
+                      media_group_id TEXT,
+                      status TEXT DEFAULT 'pending',  -- pending, approved, rejected
+                      submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      reviewed_at TIMESTAMP,
+                      reviewed_by INTEGER,
+                      reward_points INTEGER DEFAULT 0,
+                      reward_spins INTEGER DEFAULT 0,
+                      admin_message_id INTEGER,  -- ID сообщения админа для ответа
+                      user_message_id INTEGER,   -- ID сообщения пользователя
+                      FOREIGN KEY (task_id) REFERENCES verification_tasks (id),
+                      FOREIGN KEY (user_id) REFERENCES users (user_id),
+                      FOREIGN KEY (project_id) REFERENCES projects (id),
+                      FOREIGN KEY (reviewed_by) REFERENCES users (user_id))''')
+        
+        # Таблица медиафайлов для заявок
+        c.execute('''CREATE TABLE IF NOT EXISTS submission_media
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      submission_id INTEGER,
+                      file_id TEXT,
+                      file_type TEXT,  -- photo, video
+                      file_unique_id TEXT,
+                      FOREIGN KEY (submission_id) REFERENCES task_submissions (id))''')
+        
+        # Добавляем индексы для ускорения поиска
+        c.execute("CREATE INDEX IF NOT EXISTS idx_submissions_status ON task_submissions(status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_submissions_user ON task_submissions(user_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_submissions_task ON task_submissions(task_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_media_submission ON submission_media(submission_id)")
         
         # Добавляем начальные данные, только если таблицы пустые
         c.execute("SELECT COUNT(*) as count FROM tasks")
@@ -402,9 +498,12 @@ def init_db():
         
         conn.commit()
         print("✅ База данных инициализирована (данные сохранены)")
+        print("✅ Добавлены таблицы для заданий с проверкой")
         
     except Exception as e:
         print(f"❌ Ошибка при инициализации БД: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         if conn:
             conn.close()
@@ -1177,7 +1276,304 @@ def complete_task(user_id: int, task_id: int) -> bool:
     finally:
         if conn:
             conn.close()
+# ==================== ФУНКЦИИ ДЛЯ ЗАДАНИЙ С ПРОВЕРКОЙ ====================
 
+@retry_on_locked()
+def add_verification_task(name: str, description: str, instructions: str, 
+                         project_id: int = None, promo_code: str = None,
+                         reward_points: int = 0, reward_spins: int = 0):
+    """Добавить задание с проверкой"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Получаем URL проекта, если указан project_id
+        project_url = None
+        if project_id:
+            c.execute("SELECT url FROM projects WHERE id = ?", (project_id,))
+            project = c.fetchone()
+            if project:
+                project_url = project['url']
+        
+        c.execute("""
+            INSERT INTO verification_tasks 
+            (task_name, description, instructions, project_id, project_url, 
+             promo_code, reward_points, reward_spins) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (name, description, instructions, project_id, project_url, 
+              promo_code, reward_points, reward_spins))
+        conn.commit()
+        return c.lastrowid
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def get_verification_tasks(include_inactive: bool = False) -> List:
+    """Получить список заданий с проверкой"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        if include_inactive:
+            c.execute("""
+                SELECT vt.*, p.title as project_title 
+                FROM verification_tasks vt
+                LEFT JOIN projects p ON vt.project_id = p.id
+                ORDER BY vt.id
+            """)
+        else:
+            c.execute("""
+                SELECT vt.*, p.title as project_title 
+                FROM verification_tasks vt
+                LEFT JOIN projects p ON vt.project_id = p.id
+                WHERE vt.is_active = 1 
+                ORDER BY vt.id
+            """)
+        return [dict(row) for row in c.fetchall()]
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def get_verification_task_by_id(task_id: int):
+    """Получить задание с проверкой по ID"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            SELECT vt.*, p.title as project_title 
+            FROM verification_tasks vt
+            LEFT JOIN projects p ON vt.project_id = p.id
+            WHERE vt.id = ?
+        """, (task_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def update_verification_task(task_id: int, **kwargs):
+    """Обновить задание с проверкой"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        allowed_fields = ['task_name', 'description', 'instructions', 'project_id', 
+                         'promo_code', 'reward_points', 'reward_spins', 'is_active']
+        updates = []
+        params = []
+        
+        for field, value in kwargs.items():
+            if field in allowed_fields:
+                updates.append(f"{field} = ?")
+                params.append(value)
+        
+        if not updates:
+            return False
+        
+        params.append(task_id)
+        c.execute(f"UPDATE verification_tasks SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+        return c.rowcount > 0
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def delete_verification_task(task_id: int):
+    """Удалить задание с проверкой"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        # Сначала удаляем связанные медиа и заявки
+        c.execute("""
+            DELETE FROM submission_media 
+            WHERE submission_id IN (SELECT id FROM task_submissions WHERE task_id = ?)
+        """, (task_id,))
+        c.execute("DELETE FROM task_submissions WHERE task_id = ?", (task_id,))
+        c.execute("DELETE FROM verification_tasks WHERE id = ?", (task_id,))
+        conn.commit()
+        return c.rowcount > 0
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def create_submission(task_id: int, user_id: int, project_id: int = None, 
+                     reward_points: int = 0, reward_spins: int = 0) -> int:
+    """Создать заявку на проверку"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO task_submissions 
+            (task_id, user_id, project_id, status, reward_points, reward_spins) 
+            VALUES (?, ?, ?, 'pending', ?, ?)
+        """, (task_id, user_id, project_id, reward_points, reward_spins))
+        conn.commit()
+        return c.lastrowid
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def add_submission_media(submission_id: int, file_id: str, file_type: str, file_unique_id: str):
+    """Добавить медиафайл к заявке"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO submission_media (submission_id, file_id, file_type, file_unique_id) 
+            VALUES (?, ?, ?, ?)
+        """, (submission_id, file_id, file_type, file_unique_id))
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def get_pending_submissions() -> List:
+    """Получить все ожидающие проверки заявки"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            SELECT ts.*, vt.task_name, u.username, u.first_name 
+            FROM task_submissions ts
+            JOIN verification_tasks vt ON ts.task_id = vt.id
+            JOIN users u ON ts.user_id = u.user_id
+            WHERE ts.status = 'pending'
+            ORDER BY ts.submitted_at
+        """)
+        return [dict(row) for row in c.fetchall()]
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def get_submission_by_id(submission_id: int):
+    """Получить заявку по ID"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            SELECT ts.*, vt.task_name, vt.reward_points, vt.reward_spins,
+                   u.username, u.first_name, u.user_id
+            FROM task_submissions ts
+            JOIN verification_tasks vt ON ts.task_id = vt.id
+            JOIN users u ON ts.user_id = u.user_id
+            WHERE ts.id = ?
+        """, (submission_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def get_submission_media(submission_id: int) -> List:
+    """Получить все медиафайлы заявки"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            SELECT * FROM submission_media 
+            WHERE submission_id = ? 
+            ORDER BY id
+        """, (submission_id,))
+        return [dict(row) for row in c.fetchall()]
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def approve_submission(submission_id: int, admin_id: int):
+    """Одобрить заявку и начислить награду"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Получаем информацию о заявке
+        c.execute("SELECT * FROM task_submissions WHERE id = ?", (submission_id,))
+        submission = c.fetchone()
+        if not submission:
+            return False
+        
+        # Начисляем награду пользователю
+        if submission['reward_points'] > 0:
+            c.execute("""
+                UPDATE users SET points = points + ? 
+                WHERE user_id = ?
+            """, (submission['reward_points'], submission['user_id']))
+        
+        if submission['reward_spins'] > 0:
+            c.execute("""
+                UPDATE users SET spins = spins + ? 
+                WHERE user_id = ?
+            """, (submission['reward_spins'], submission['user_id']))
+        
+        # Обновляем статус заявки
+        c.execute("""
+            UPDATE task_submissions 
+            SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+            WHERE id = ?
+        """, (admin_id, submission_id))
+        
+        conn.commit()
+        return True
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def reject_submission(submission_id: int, admin_id: int):
+    """Отклонить заявку"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            UPDATE task_submissions 
+            SET status = 'rejected', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+            WHERE id = ?
+        """, (admin_id, submission_id))
+        conn.commit()
+        return c.rowcount > 0
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def get_user_submissions(user_id: int, limit: int = 10) -> List:
+    """Получить заявки пользователя"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            SELECT ts.*, vt.task_name 
+            FROM task_submissions ts
+            JOIN verification_tasks vt ON ts.task_id = vt.id
+            WHERE ts.user_id = ?
+            ORDER BY ts.submitted_at DESC
+            LIMIT ?
+        """, (user_id, limit))
+        return [dict(row) for row in c.fetchall()]
+    finally:
+        if conn:
+            conn.close()
 # ==================== ФУНКЦИИ ДЛЯ МАГАЗИНА ====================
 @retry_on_locked()
 def update_shop_item(item_id: int, **kwargs):
@@ -2387,16 +2783,108 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
     
 @dp.message(F.text == "📋 ЗАДАНИЯ")
 async def tasks_menu(message: Message):
-    """Список заданий"""
+    """Меню заданий - выбор типа заданий"""
     user_id = message.from_user.id
+    
+    # Получаем количество ожидающих проверки заданий пользователя
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT COUNT(*) as count FROM task_submissions 
+            WHERE user_id = ? AND status = 'pending'
+        """, (user_id,))
+        pending_count = c.fetchone()['count']
+    
+    # Получаем количество доступных заданий с проверкой
+    verification_tasks = get_verification_tasks()
+    verification_count = len(verification_tasks)
+    
+    # Получаем обычные задания
+    all_tasks, completed_tasks = get_user_tasks(user_id)
+    regular_count = len(all_tasks)
+    
+    # Формируем текст меню
+    text = "📋 <b>ВЫБЕРИТЕ ТИП ЗАДАНИЙ</b>\n\n"
+    
+    if pending_count > 0:
+        text += f"⏳ <b>У вас {pending_count} заданий на проверке</b>\n\n"
+    
+    text += (
+        "📝 <b>Обычные задания</b> - выполняются автоматически\n"
+        f"   Доступно: {regular_count}\n\n"
+        "📸 <b>Задания с проверкой</b> - требуют подтверждения от администратора\n"
+        f"   Доступно: {verification_count}\n"
+    )
+    
+    if verification_count > 0:
+        text += "   💰 Награда: баллы + попытки\n"
+    
+    # Создаем клавиатуру
+    keyboard = InlineKeyboardBuilder()
+    
+    if regular_count > 0:
+        keyboard.row(InlineKeyboardButton(
+            text=f"📝 Обычные задания ({regular_count})", 
+            callback_data="regular_tasks"
+        ))
+    
+    if verification_count > 0:
+        # Если есть задания на проверке, показываем специальную кнопку
+        if pending_count > 0:
+            keyboard.row(InlineKeyboardButton(
+                text=f"⏳ Мои задания на проверке ({pending_count})", 
+                callback_data="my_pending_tasks"
+            ))
+        
+        keyboard.row(InlineKeyboardButton(
+            text=f"📸 Задания с проверкой ({verification_count})", 
+            callback_data="verification_tasks"
+        ))
+    
+    await message.answer(
+        text, 
+        reply_markup=keyboard.as_markup(),
+        parse_mode='HTML'
+    )
+
+# ==================== ОБРАБОТЧИКИ ЗАДАНИЙ ====================
+# ВАЖНО: порядок имеет значение - от более специфичных к более общим
+@dp.callback_query(F.data == "back_to_tasks_menu")
+async def back_to_tasks_menu(callback: CallbackQuery):
+    """Возврат в меню выбора типа заданий"""
+    await callback.answer()
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.row(InlineKeyboardButton(text="📝 Обычные задания", callback_data="regular_tasks"))
+    keyboard.row(InlineKeyboardButton(text="📸 Задания с проверкой", callback_data="verification_tasks"))
+    
+    await safe_edit_message(
+        callback.message,
+        "📋 ВЫБЕРИТЕ ТИП ЗАДАНИЙ\n\n"
+        "📝 Обычные задания - выполняются автоматически\n"
+        "📸 Задания с проверкой - требуют подтверждения от администратора",
+        reply_markup=keyboard.as_markup()
+    )
+
+@dp.callback_query(F.data == "regular_tasks")
+async def regular_tasks_list(callback: CallbackQuery):
+    """Список обычных заданий"""
+    await callback.answer()
+    
+    user_id = callback.from_user.id
     all_tasks, completed_tasks = get_user_tasks(user_id)
     
     if not all_tasks:
-        await message.answer("📋 ЗАДАНИЯ\n\nК сожалению, сейчас нет доступных заданий.",
-                           reply_markup=get_main_keyboard(user_id))
+        await safe_edit_message(
+            callback.message,
+            "📝 ОБЫЧНЫЕ ЗАДАНИЯ\n\nК сожалению, сейчас нет доступных заданий.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_tasks_menu")]
+            ])
+        )
         return
     
-    text = "📋 ЗАДАНИЯ\n\nВыполняй задания и получай бонусы!\n\n"
+    text = "📝 ОБЫЧНЫЕ ЗАДАНИЯ\n\nВыполняй задания и получай бонусы!\n\n"
     
     keyboard = InlineKeyboardBuilder()
     
@@ -2414,12 +2902,124 @@ async def tasks_menu(message: Message):
                 callback_data="done"
             ))
     
-    await message.answer(text, reply_markup=keyboard.as_markup())
-    await message.answer("Выберите действие:", reply_markup=get_main_keyboard(user_id))
+    keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_tasks_menu"))
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup())
 
-# ==================== ОБРАБОТЧИКИ ЗАДАНИЙ ====================
-# ВАЖНО: порядок имеет значение - от более специфичных к более общим
+@dp.callback_query(F.data == "verification_tasks")
+async def verification_tasks_list(callback: CallbackQuery):
+    """Список заданий с проверкой"""
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    tasks = get_verification_tasks()
+    
+    if not tasks:
+        await safe_edit_message(
+            callback.message,
+            "📸 ЗАДАНИЯ С ПРОВЕРКОЙ\n\nК сожалению, сейчас нет доступных заданий.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_tasks_menu")]
+            ])
+        )
+        return
+    
+    text = "📸 ЗАДАНИЯ С ПРОВЕРКОЙ\n\n"
+    text += "Выберите задание для выполнения:\n\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    
+    for task in tasks:
+        # Проверяем, есть ли у пользователя уже активная заявка
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT id FROM task_submissions 
+                WHERE task_id = ? AND user_id = ? AND status = 'pending'
+            """, (task['id'], user_id))
+            pending = c.fetchone()
+        
+        status = "⏳" if pending else "✅"
+        text += f"{status} <b>{task['task_name']}</b>\n"
+        text += f"📝 {task['description']}\n"
+        text += f"💰 Награда: +{task['reward_points']} баллов, +{task['reward_spins']}🎡\n"
+        if task.get('project_title'):
+            text += f"🏢 Проект: {task['project_title']}\n"
+        text += "\n"
+        
+        if pending:
+            keyboard.row(InlineKeyboardButton(
+                text=f"⏳ {task['task_name']} (на проверке)",
+                callback_data=f"task_pending_{task['id']}"
+            ))
+        else:
+            keyboard.row(InlineKeyboardButton(
+                text=f"📸 {task['task_name']}",
+                callback_data=f"start_verification_{task['id']}"
+            ))
+    
+    keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_tasks_menu"))
+    
+    await safe_edit_message(
+        callback.message,
+        text,
+        reply_markup=keyboard.as_markup(),
+        parse_mode='HTML'
+    )
 
+@dp.callback_query(F.data.startswith("task_pending_"))
+async def task_pending_info(callback: CallbackQuery):
+    """Информация о задании на проверке"""
+    await callback.answer("Это задание уже отправлено на проверку!", show_alert=True)
+
+@dp.callback_query(F.data.startswith("start_verification_"))
+async def start_verification_task(callback: CallbackQuery, state: FSMContext):
+    """Начало выполнения задания с проверкой"""
+    await callback.answer()
+    
+    task_id = int(callback.data.split("_")[2])
+    task = get_verification_task_by_id(task_id)
+    
+    if not task:
+        await safe_edit_message(callback.message, "❌ Задание не найдено!")
+        return
+    
+    # Сохраняем информацию о задании в состоянии
+    await state.update_data(
+        verification_task_id=task_id,
+        task_name=task['task_name'],
+        project_id=task['project_id'],
+        project_url=task['project_url'],
+        promo_code=task['promo_code'],
+        reward_points=task['reward_points'],
+        reward_spins=task['reward_spins']
+    )
+    
+    # Формируем текст задания
+    text = f"📸 <b>{task['task_name']}</b>\n\n"
+    text += f"{task['description']}\n\n"
+    
+    if task['instructions']:
+        text += f"📋 <b>Инструкция:</b>\n{task['instructions']}\n\n"
+    
+    if task['project_url']:
+        text += f"🔗 <b>Ссылка на проект:</b>\n{task['project_url']}\n"
+    
+    if task['promo_code']:
+        text += f"🎫 <b>Промокод:</b> <code>{task['promo_code']}</code>\n\n"
+    
+    text += f"💰 <b>Награда:</b> +{task['reward_points']} баллов, +{task['reward_spins']}🎡\n\n"
+    text += "📤 <b>Отправьте подтверждение выполнения</b>\n"
+    text += "Вы можете отправить несколько фото или видео (до 10 файлов).\n"
+    text += "После отправки всех файлов нажмите кнопку 'Завершить отправку'."
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Завершить отправку", callback_data="finish_verification_submit")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="verification_tasks")]
+    ])
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard, parse_mode='HTML')
+    await state.set_state(TaskVerificationStates.waiting_for_photo)
 @dp.callback_query(F.data == "done")
 async def done_callback(callback: CallbackQuery):
     """Обработчик для уже выполненных заданий"""
@@ -2463,6 +3063,71 @@ async def task_complete_callback(callback: CallbackQuery):
         await callback.message.answer("Выберите действие:", reply_markup=get_main_keyboard(user_id))
     else:
         await safe_edit_message(callback.message, "❌ Задание уже было выполнено ранее!")
+@dp.message(TaskVerificationStates.waiting_for_photo, F.photo | F.video)
+async def handle_verification_media(message: Message, state: FSMContext, album: List[Message] = None):
+    """Обработка медиафайлов для подтверждения"""
+    data = await state.get_data()
+    
+    # Получаем или создаем список файлов
+    media_files = data.get('verification_media', [])
+    media_group_id = data.get('media_group_id')
+    
+    # Если это альбом (несколько файлов сразу)
+    if album:
+        for msg in album:
+            if msg.photo:
+                file_id = msg.photo[-1].file_id
+                file_unique_id = msg.photo[-1].file_unique_id
+                file_type = 'photo'
+            elif msg.video:
+                file_id = msg.video.file_id
+                file_unique_id = msg.video.file_unique_id
+                file_type = 'video'
+            else:
+                continue
+            
+            media_files.append({
+                'file_id': file_id,
+                'file_type': file_type,
+                'file_unique_id': file_unique_id
+            })
+        
+        if not media_group_id and album[0].media_group_id:
+            media_group_id = album[0].media_group_id
+    
+    # Если это одиночный файл
+    else:
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            file_unique_id = message.photo[-1].file_unique_id
+            file_type = 'photo'
+        elif message.video:
+            file_id = message.video.file_id
+            file_unique_id = message.video.file_unique_id
+            file_type = 'video'
+        else:
+            await message.answer("❌ Пожалуйста, отправьте фото или видео")
+            return
+        
+        media_files.append({
+            'file_id': file_id,
+            'file_type': file_type,
+            'file_unique_id': file_unique_id
+        })
+        
+        if not media_group_id and message.media_group_id:
+            media_group_id = message.media_group_id
+    
+    # Сохраняем обновленный список
+    await state.update_data(
+        verification_media=media_files,
+        media_group_id=media_group_id
+    )
+    
+    # Подтверждаем получение
+    count = len(media_files)
+    await message.reply(f"✅ Файл {count} получен. Можете отправить еще или нажмите 'Завершить отправку'.")
+
 
 @dp.callback_query(F.data.startswith("check_"))
 async def check_callback(callback: CallbackQuery):
@@ -2622,7 +3287,89 @@ async def task_callback(callback: CallbackQuery):
             f"Награда: +{task['reward_spins']}🎡 +{task['reward_points']}💰",
             reply_markup=keyboard
         )
-
+@dp.callback_query(F.data == "finish_verification_submit", TaskVerificationStates.waiting_for_photo)
+async def finish_verification_submit(callback: CallbackQuery, state: FSMContext):
+    """Завершение отправки и создание заявки"""
+    await callback.answer()
+    
+    data = await state.get_data()
+    media_files = data.get('verification_media', [])
+    
+    if not media_files:
+        await callback.message.edit_text(
+            "❌ Вы не отправили ни одного файла!\n"
+            "Отправьте фото или видео подтверждение.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="verification_tasks")]
+            ])
+        )
+        return
+    
+    user_id = callback.from_user.id
+    task_id = data['verification_task_id']
+    project_id = data.get('project_id')
+    
+    # Создаем заявку
+    submission_id = create_submission(
+        task_id=task_id,
+        user_id=user_id,
+        project_id=project_id,
+        reward_points=data['reward_points'],
+        reward_spins=data['reward_spins']
+    )
+    
+    if not submission_id:
+        await callback.message.edit_text("❌ Ошибка при создании заявки")
+        await state.clear()
+        return
+    
+    # Сохраняем все медиафайлы
+    for media in media_files:
+        add_submission_media(
+            submission_id=submission_id,
+            file_id=media['file_id'],
+            file_type=media['file_type'],
+            file_unique_id=media['file_unique_id']
+        )
+    
+    # Отправляем уведомление пользователю
+    await callback.message.edit_text(
+        "✅ <b>Задание отправлено на проверку!</b>\n\n"
+        "Администратор рассмотрит ваше подтверждение в ближайшее время.\n"
+        "Вы получите уведомление о результате.",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ К заданиям", callback_data="verification_tasks")]
+        ])
+    )
+    
+    # Отправляем уведомление админам
+    task_name = data.get('task_name', 'Задание')
+    user = callback.from_user
+    
+    for admin_id in ADMIN_IDS:
+        try:
+            # Создаем клавиатуру для админа
+            admin_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Принять", callback_data=f"approve_submission_{submission_id}"),
+                 InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_submission_{submission_id}")],
+                [InlineKeyboardButton(text="📸 Просмотреть файлы", callback_data=f"view_submission_{submission_id}")]
+            ])
+            
+            await bot.send_message(
+                admin_id,
+                f"📸 <b>Новая заявка на проверку!</b>\n\n"
+                f"👤 Пользователь: {get_user_display(user.id, user.username, user.first_name)}\n"
+                f"📋 Задание: {task_name}\n"
+                f"📎 Файлов: {len(media_files)}\n\n"
+                f"Нажмите 'Просмотреть файлы' для проверки.",
+                parse_mode='HTML',
+                reply_markup=admin_keyboard
+            )
+        except:
+            pass
+    
+    await state.clear()
 @dp.message(F.text == "🎡 КОЛЕСО")
 async def wheel_of_fortune(message: Message):
     """Колесо фортуны"""
@@ -3040,9 +3787,18 @@ async def show_admin_menu(message: Message):
     promocodes = get_all_promocodes(include_inactive=True)
     active_promos = sum(1 for p in promocodes if p['is_active'])
     
+    # Получаем количество ожидающих проверки заявок
+    pending_submissions = get_pending_submissions()
+    pending_count = len(pending_submissions)
+    
     text = "⚙️ АДМИН ПАНЕЛЬ\n\n"
+    
+    if pending_count > 0:
+        text += f"📸 <b>Новых заявок на проверку: {pending_count}</b>\n\n"
+    
     if notifications_count > 0:
         text += f"🔔 У вас {notifications_count} новых уведомлений!\n\n"
+    
     text += f"🎫 Активных промокодов: {active_promos}\n\n"
     text += "Выберите раздел для управления:"
     
@@ -3053,14 +3809,15 @@ async def show_admin_menu(message: Message):
         [InlineKeyboardButton(text="🏪 Управление магазином", callback_data="admin_shop")],
         [InlineKeyboardButton(text="🎡 Управление колесом", callback_data="admin_wheel")],
         [InlineKeyboardButton(text="📋 Управление заданиями", callback_data="admin_tasks")],
+        [InlineKeyboardButton(text=f"📸 Задания с проверкой ({pending_count})", callback_data="admin_verification_tasks")],
         [InlineKeyboardButton(text="🎰 Управление джекпотом", callback_data="admin_jackpot")],
-        [InlineKeyboardButton(text="🎫 Управление промокодами", callback_data="admin_promocodes")],  # Новая кнопка
+        [InlineKeyboardButton(text="🎫 Управление промокодами", callback_data="admin_promocodes")],
         [InlineKeyboardButton(text="💣 Настройка Mines", callback_data="admin_mines")],
         [InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_mailing")],
         [InlineKeyboardButton(text="💰 Начислить бонусы", callback_data="admin_add_bonus")],
     ])
     
-    await message.answer(text, reply_markup=keyboard)
+    await message.answer(text, reply_markup=keyboard, parse_mode='HTML')
 
 @dp.message(F.text == "⚙️ АДМИН")
 async def admin_panel(message: Message, state: FSMContext):
@@ -3074,7 +3831,7 @@ async def admin_panel(message: Message, state: FSMContext):
         msg = await message.answer("⛔ Доступ запрещен!")
         await asyncio.sleep(2)
         await msg.delete()
-# ==================== УВЕДОМЛЕНИЯ ====================
+ # ==================== УВЕДОМЛЕНИЯ ====================
 
 @dp.callback_query(F.data == "admin_notifications")
 async def admin_notifications(callback: CallbackQuery):
@@ -4107,7 +4864,522 @@ async def confirm_delete_shop_item(callback: CallbackQuery):
         await admin_shop_menu(callback)
     else:
         await safe_edit_message(callback.message, "❌ Ошибка при удалении товара")
+# ==================== УПРАВЛЕНИЕ ЗАДАНИЯМИ С ПРОВЕРКОЙ ====================
+# ВСТАВЬТЕ ВСЕ ЭТИ ОБРАБОТЧИКИ СЮДА
 
+@dp.callback_query(F.data == "admin_verification_tasks")
+async def admin_verification_tasks_menu(callback: CallbackQuery):
+    """Меню управления заданиями с проверкой"""
+    await callback.answer()
+    
+    tasks = get_verification_tasks(include_inactive=True)
+    pending = get_pending_submissions()
+    
+    text = "📸 УПРАВЛЕНИЕ ЗАДАНИЯМИ С ПРОВЕРКОЙ\n\n"
+    text += f"📊 <b>Статистика:</b>\n"
+    text += f"   • Всего заданий: {len(tasks)}\n"
+    text += f"   • Ожидают проверки: {len(pending)}\n\n"
+    
+    if pending:
+        text += "⏳ <b>Последние заявки:</b>\n"
+        for sub in pending[:3]:
+            user_display = get_user_display(sub['user_id'], sub['username'], sub['first_name'])
+            text += f"   • {user_display} - {sub['task_name']}\n"
+        text += "\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.row(InlineKeyboardButton(
+        text=f"📋 Проверить заявки ({len(pending)})", 
+        callback_data="check_pending_submissions"
+    ))
+    keyboard.row(InlineKeyboardButton(
+        text="➕ Добавить задание", 
+        callback_data="add_verification_task"
+    ))
+    keyboard.row(InlineKeyboardButton(
+        text="✏️ Редактировать задания", 
+        callback_data="edit_verification_tasks"
+    ))
+    keyboard.row(InlineKeyboardButton(
+        text="◀️ Назад", 
+        callback_data="back_to_admin"
+    ))
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup(), parse_mode='HTML')
+
+@dp.callback_query(F.data == "check_pending_submissions")
+async def check_pending_submissions(callback: CallbackQuery):
+    """Просмотр ожидающих проверки заявок"""
+    await callback.answer()
+    
+    pending = get_pending_submissions()
+    
+    if not pending:
+        await safe_edit_message(
+            callback.message,
+            "📸 ЗАЯВКИ НА ПРОВЕРКУ\n\nНет ожидающих проверки заявок.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_verification_tasks")]
+            ])
+        )
+        return
+    
+    text = "📸 <b>ЗАЯВКИ НА ПРОВЕРКУ</b>\n\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    
+    for sub in pending:
+        user_display = get_user_display(sub['user_id'], sub['username'], sub['first_name'])
+        text += f"📋 <b>Заявка #{sub['id']}</b>\n"
+        text += f"👤 Пользователь: {user_display}\n"
+        text += f"📌 Задание: {sub['task_name']}\n"
+        text += f"⏰ Отправлено: {sub['submitted_at'][:16]}\n\n"
+        
+        keyboard.row(InlineKeyboardButton(
+            text=f"📋 Рассмотреть заявку #{sub['id']}",
+            callback_data=f"review_submission_{sub['id']}"
+        ))
+    
+    keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_verification_tasks"))
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup(), parse_mode='HTML')
+
+@dp.callback_query(F.data.startswith("review_submission_"))
+async def review_submission(callback: CallbackQuery):
+    """Рассмотрение конкретной заявки"""
+    await callback.answer()
+    
+    submission_id = int(callback.data.split("_")[2])
+    submission = get_submission_by_id(submission_id)
+    
+    if not submission:
+        await safe_edit_message(callback.message, "❌ Заявка не найдена!")
+        return
+    
+    # Получаем медиафайлы
+    media_files = get_submission_media(submission_id)
+    
+    user_display = get_user_display(
+        submission['user_id'], 
+        submission['username'], 
+        submission['first_name']
+    )
+    
+    text = (
+        f"📸 <b>РАССМОТРЕНИЕ ЗАЯВКИ #{submission_id}</b>\n\n"
+        f"👤 <b>Пользователь:</b> {user_display}\n"
+        f"📌 <b>Задание:</b> {submission['task_name']}\n"
+        f"⏰ <b>Отправлено:</b> {submission['submitted_at'][:16]}\n"
+        f"📎 <b>Файлов:</b> {len(media_files)}\n\n"
+        f"💰 <b>Награда:</b> +{submission['reward_points']}💰 +{submission['reward_spins']}🎡\n\n"
+        f"<b>Действия:</b>"
+    )
+    
+    keyboard = InlineKeyboardBuilder()
+    
+    # Кнопки для просмотра файлов
+    if media_files:
+        for i, media in enumerate(media_files, 1):
+            emoji = "📷" if media['file_type'] == 'photo' else "🎥"
+            keyboard.row(InlineKeyboardButton(
+                text=f"{emoji} Файл {i}",
+                callback_data=f"view_media_{submission_id}_{media['id']}"
+            ))
+    
+    # Кнопки действий
+    keyboard.row(
+        InlineKeyboardButton(text="✅ Принять", callback_data=f"approve_submission_{submission_id}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_submission_{submission_id}")
+    )
+    keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="check_pending_submissions"))
+    
+    # Сохраняем ID сообщения админа для ответа
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE task_submissions SET admin_message_id = ? WHERE id = ?",
+            (callback.message.message_id, submission_id)
+        )
+        conn.commit()
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup(), parse_mode='HTML')
+
+@dp.callback_query(F.data.startswith("view_media_"))
+async def view_submission_media(callback: CallbackQuery):
+    """Просмотр медиафайла заявки"""
+    await callback.answer()
+    
+    parts = callback.data.split("_")
+    submission_id = int(parts[2])
+    media_id = int(parts[3])
+    
+    # Получаем информацию о медиафайле
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM submission_media WHERE id = ?", (media_id,))
+        media = c.fetchone()
+    
+    if not media:
+        await callback.answer("❌ Файл не найден", show_alert=True)
+        return
+    
+    # Отправляем файл
+    try:
+        if media['file_type'] == 'photo':
+            await callback.message.answer_photo(
+                media['file_id'],
+                caption=f"📸 Файл из заявки #{submission_id}"
+            )
+        else:  # video
+            await callback.message.answer_video(
+                media['file_id'],
+                caption=f"🎥 Видео из заявки #{submission_id}"
+            )
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка при загрузке файла: {e}")
+
+@dp.callback_query(F.data.startswith("approve_submission_"))
+async def approve_submission_handler(callback: CallbackQuery):
+    """Одобрение заявки"""
+    await callback.answer()
+    
+    submission_id = int(callback.data.split("_")[2])
+    admin_id = callback.from_user.id
+    
+    submission = get_submission_by_id(submission_id)
+    if not submission:
+        await safe_edit_message(callback.message, "❌ Заявка не найдена!")
+        return
+    
+    if approve_submission(submission_id, admin_id):
+        # Уведомляем пользователя
+        try:
+            text = (
+                f"✅ <b>Задание выполнено!</b>\n\n"
+                f"📌 <b>{submission['task_name']}</b>\n"
+                f"💰 Награда зачислена на ваш баланс:\n"
+                f"   • +{submission['reward_points']} баллов\n"
+                f"   • +{submission['reward_spins']} попыток\n\n"
+                f"Спасибо за выполнение!"
+            )
+            
+            await bot.send_message(submission['user_id'], text, parse_mode='HTML')
+                
+        except Exception as e:
+            logger.error(f"Ошибка при уведомлении пользователя: {e}")
+        
+        # Обновляем сообщение админа
+        await safe_edit_message(
+            callback.message,
+            f"✅ Заявка #{submission_id} одобрена!\n\n"
+            f"Награда начислена пользователю.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ К списку заявок", callback_data="check_pending_submissions")]
+            ])
+        )
+    else:
+        await safe_edit_message(callback.message, "❌ Ошибка при одобрении заявки")
+
+@dp.callback_query(F.data.startswith("reject_submission_"))
+async def reject_submission_handler(callback: CallbackQuery, state: FSMContext):
+    """Отклонение заявки"""
+    await callback.answer()
+    
+    submission_id = int(callback.data.split("_")[2])
+    await state.update_data(reject_submission_id=submission_id)
+    
+    await safe_edit_message(
+        callback.message,
+        "❌ Укажите причину отклонения (или отправьте '0' чтобы отклонить без причины):"
+    )
+    await state.set_state("waiting_for_reject_reason")
+
+@dp.message(StateFilter("waiting_for_reject_reason"))
+async def process_reject_reason(message: Message, state: FSMContext):
+    """Обработка причины отклонения"""
+    data = await state.get_data()
+    submission_id = data['reject_submission_id']
+    admin_id = message.from_user.id
+    
+    reason = None if message.text == '0' else message.text
+    
+    submission = get_submission_by_id(submission_id)
+    if not submission:
+        await message.answer("❌ Заявка не найдена!")
+        await state.clear()
+        return
+    
+    if reject_submission(submission_id, admin_id):
+        # Уведомляем пользователя
+        try:
+            text = (
+                f"❌ <b>Задание отклонено</b>\n\n"
+                f"📌 <b>{submission['task_name']}</b>\n"
+            )
+            
+            if reason:
+                text += f"\n📝 <b>Причина:</b> {reason}\n\n"
+            else:
+                text += f"\n"
+            
+            text += "Пожалуйста, ознакомьтесь с требованиями и отправьте заявку заново."
+            
+            await bot.send_message(submission['user_id'], text, parse_mode='HTML')
+                
+        except Exception as e:
+            logger.error(f"Ошибка при уведомлении пользователя: {e}")
+        
+        await message.answer(
+            f"❌ Заявка #{submission_id} отклонена",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ К списку заявок", callback_data="check_pending_submissions")]
+            ])
+        )
+    else:
+        await message.answer("❌ Ошибка при отклонении заявки")
+    
+    await state.clear()
+
+@dp.callback_query(F.data == "add_verification_task")
+async def add_verification_task_start(callback: CallbackQuery, state: FSMContext):
+    """Начало добавления задания с проверкой"""
+    await callback.answer()
+    
+    # Получаем список проектов для выбора
+    projects = get_projects()
+    projects_text = ""
+    if projects:
+        projects_text = "Доступные проекты:\n" + "\n".join([f"ID {p['id']}: {p['title']}" for p in projects])
+    else:
+        projects_text = "Нет доступных проектов. Сначала добавьте проекты."
+    
+    await safe_edit_message(
+        callback.message,
+        f"📸 <b>ДОБАВЛЕНИЕ ЗАДАНИЯ С ПРОВЕРКОЙ</b>\n\n"
+        f"Введите название задания:\n"
+        f"(Например: Регистрация на 1win)",
+        parse_mode='HTML'
+    )
+    await state.set_state(AdminStates.waiting_for_task_with_verification)
+    await state.update_data(step='name')
+
+@dp.message(AdminStates.waiting_for_task_with_verification)
+async def add_verification_task_process(message: Message, state: FSMContext):
+    """Пошаговое создание задания с проверкой"""
+    data = await state.get_data()
+    step = data.get('step')
+    
+    if step == 'name':
+        await state.update_data(task_name=message.text, step='description')
+        await message.answer(
+            "Введите описание задания:\n"
+            "(Что нужно сделать пользователю)"
+        )
+    
+    elif step == 'description':
+        await state.update_data(description=message.text, step='instructions')
+        await message.answer(
+            "Введите подробную инструкцию:\n"
+            "(Как выполнить задание, требования и т.д.)"
+        )
+    
+    elif step == 'instructions':
+        await state.update_data(instructions=message.text, step='project')
+        
+        # Показываем список проектов для выбора
+        projects = get_projects()
+        if projects:
+            text = "Выберите проект (введите ID проекта) или 0 чтобы пропустить:\n\n"
+            for p in projects:
+                text += f"ID {p['id']}: {p['title']}\n"
+                if p.get('url'):
+                    text += f"   URL: {p['url']}\n"
+            await message.answer(text)
+        else:
+            await state.update_data(project_id=None, step='promo')
+            await message.answer(
+                "Введите промокод для проекта (или 0 чтобы пропустить):"
+            )
+    
+    elif step == 'project':
+        try:
+            project_id = int(message.text) if message.text != '0' else None
+            if project_id and not get_project_by_id(project_id):
+                await message.answer("❌ Проект с таким ID не найден! Попробуйте снова:")
+                return
+            await state.update_data(project_id=project_id, step='promo')
+            await message.answer(
+                "Введите промокод для проекта (или 0 чтобы пропустить):"
+            )
+        except ValueError:
+            await message.answer("❌ Введите число!")
+    
+    elif step == 'promo':
+        promo_code = message.text if message.text != '0' else None
+        await state.update_data(promo_code=promo_code, step='reward_points')
+        await message.answer(
+            "Введите количество баллов за выполнение (или 0):"
+        )
+    
+    elif step == 'reward_points':
+        try:
+            points = int(message.text)
+            await state.update_data(reward_points=points, step='reward_spins')
+            await message.answer(
+                "Введите количество попыток вращения за выполнение (или 0):"
+            )
+        except ValueError:
+            await message.answer("❌ Введите число!")
+    
+    elif step == 'reward_spins':
+        try:
+            spins = int(message.text)
+            data = await state.get_data()
+            
+            # Создаем задание
+            task_id = add_verification_task(
+                name=data['task_name'],
+                description=data['description'],
+                instructions=data['instructions'],
+                project_id=data.get('project_id'),
+                promo_code=data.get('promo_code'),
+                reward_points=data['reward_points'],
+                reward_spins=spins
+            )
+            
+            if task_id:
+                await message.answer(
+                    f"✅ <b>Задание успешно добавлено!</b>\n\n"
+                    f"📌 Название: {data['task_name']}\n"
+                    f"💰 Награда: +{data['reward_points']}💰 +{spins}🎡\n"
+                    f"🆔 ID задания: {task_id}",
+                    parse_mode='HTML'
+                )
+            else:
+                await message.answer("❌ Ошибка при добавлении задания")
+            
+            await state.clear()
+            
+        except ValueError:
+            await message.answer("❌ Введите число!")
+
+@dp.callback_query(F.data == "edit_verification_tasks")
+async def edit_verification_tasks_list(callback: CallbackQuery):
+    """Список заданий для редактирования"""
+    await callback.answer()
+    
+    tasks = get_verification_tasks(include_inactive=True)
+    
+    if not tasks:
+        await safe_edit_message(
+            callback.message,
+            "📸 Нет добавленных заданий с проверкой.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_verification_tasks")]
+            ])
+        )
+        return
+    
+    text = "📸 ВЫБЕРИТЕ ЗАДАНИЕ ДЛЯ РЕДАКТИРОВАНИЯ\n\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    
+    for task in tasks:
+        status = "✅" if task['is_active'] else "❌"
+        keyboard.row(InlineKeyboardButton(
+            text=f"{status} {task['task_name']} (+{task['reward_points']}💰)",
+            callback_data=f"edit_verification_task_{task['id']}"
+        ))
+    
+    keyboard.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_verification_tasks"))
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup())
+
+@dp.callback_query(F.data.startswith("edit_verification_task_"))
+async def edit_verification_task_menu(callback: CallbackQuery):
+    """Меню редактирования задания"""
+    await callback.answer()
+    
+    task_id = int(callback.data.split("_")[3])
+    task = get_verification_task_by_id(task_id)
+    
+    if not task:
+        await safe_edit_message(callback.message, "❌ Задание не найдено!")
+        return
+    
+    status = "Активно" if task['is_active'] else "Неактивно"
+    project_info = f"\n🏢 Проект: {task.get('project_title', 'Не указан')}" if task.get('project_title') else ""
+    
+    text = (
+        f"📸 РЕДАКТИРОВАНИЕ ЗАДАНИЯ #{task_id}\n\n"
+        f"📌 Название: {task['task_name']}\n"
+        f"📝 Описание: {task['description'][:100]}...\n"
+        f"📋 Инструкция: {task['instructions'][:100]}...\n"
+        f"{project_info}\n"
+        f"🎫 Промокод: {task.get('promo_code', 'Не указан')}\n"
+        f"💰 Награда: +{task['reward_points']}💰 +{task['reward_spins']}🎡\n"
+        f"📊 Статус: {status}\n\n"
+        f"Выберите действие:"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Изменить статус", callback_data=f"toggle_verification_task_{task_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_verification_task_{task_id}")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="edit_verification_tasks")]
+    ])
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard)
+
+@dp.callback_query(F.data.startswith("toggle_verification_task_"))
+async def toggle_verification_task(callback: CallbackQuery):
+    """Изменение статуса задания"""
+    await callback.answer()
+    
+    task_id = int(callback.data.split("_")[3])
+    task = get_verification_task_by_id(task_id)
+    
+    if task:
+        update_verification_task(task_id, is_active=not task['is_active'])
+        new_status = "активировано" if not task['is_active'] else "деактивировано"
+        await safe_edit_message(callback.message, f"✅ Задание {new_status}!")
+        await asyncio.sleep(1)
+        await edit_verification_tasks_list(callback)
+    else:
+        await safe_edit_message(callback.message, "❌ Задание не найдено!")
+
+@dp.callback_query(F.data.startswith("delete_verification_task_"))
+async def delete_verification_task_confirm(callback: CallbackQuery):
+    """Подтверждение удаления задания"""
+    await callback.answer()
+    
+    task_id = int(callback.data.split("_")[3])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_verification_{task_id}")],
+        [InlineKeyboardButton(text="❌ Нет, отмена", callback_data=f"edit_verification_task_{task_id}")]
+    ])
+    
+    await safe_edit_message(
+        callback.message,
+        "⚠️ Вы уверены, что хотите удалить это задание?\n"
+        "Все связанные заявки также будут удалены!\n"
+        "Это действие нельзя отменить!",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query(F.data.startswith("confirm_delete_verification_"))
+async def confirm_delete_verification_task(callback: CallbackQuery):
+    """Подтвержденное удаление задания"""
+    await callback.answer()
+    
+    task_id = int(callback.data.split("_")[3])
+    
+    if delete_verification_task(task_id):
+        await safe_edit_message(callback.message, "✅ Задание успешно удалено!")
+        await asyncio.sleep(1)
+        await admin_verification_tasks_menu(callback)
+    else:
+        await safe_edit_message(callback.message, "❌ Ошибка при удалении задания")
 # ==================== УПРАВЛЕНИЕ КОЛЕСОМ ФОРТУНЫ ====================
 
 @dp.callback_query(F.data == "admin_wheel")
@@ -6007,13 +7279,15 @@ async def main():
     migrate_db()
     migrate_projects_table()
     migrate_promocodes_table()
-    migrate_shop_table()  # ЭТА СТРОКА ДОЛЖНА БЫТЬ
+    migrate_shop_table()
+    # Миграция для новых таблиц уже есть в init_db
     check_projects_db()
     print("✅ Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
