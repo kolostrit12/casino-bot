@@ -2273,92 +2273,21 @@ async def show_project(message: Message, state: FSMContext, index: int):
     
     photo_url = project.get('photo_url')
     
-    # Если это первое сообщение или нужно создать новое
-    if last_message_id is None:
-        # Отправляем новое сообщение
-        if photo_url:
-            try:
-                # Добавляем timestamp для сброса кеша
-                cache_buster = f"?t={int(time.time())}"
-                photo_url_with_cache = photo_url + cache_buster
-                print(f"🔍 Отправка фото с кеш-бастером: {photo_url_with_cache}")
-                
-                sent = await message.answer_photo(
-                    photo=photo_url_with_cache,
-                    caption=text,
-                    reply_markup=keyboard.as_markup(),
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
-                await state.update_data(last_message_id=sent.message_id)
-                return
-            except Exception as e:
-                logger.error(f"Ошибка фото: {e}")
-        
-        # Если нет фото или ошибка
-        sent = await message.answer(
-            text,
-            reply_markup=keyboard.as_markup(),
-            parse_mode='HTML',
-            disable_web_page_preview=True
-        )
-        await state.update_data(last_message_id=sent.message_id)
-        return
+    # ВСЕГДА удаляем предыдущее сообщение, если оно было
+    if last_message_id is not None:
+        try:
+            await message.delete()
+        except:
+            pass
     
-    # Редактируем существующее сообщение
-    try:
-        if photo_url:
-            # Пробуем отправить как фото
-            try:
-                # Для редактирования caption не нужно менять URL
-                await message.edit_caption(
-                    caption=text,
-                    reply_markup=keyboard.as_markup(),
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                print(f"🔍 Ошибка редактирования caption: {e}")
-                # Если не получилось, удаляем и создаем новое с кеш-бастером
-                await message.delete()
-                
-                cache_buster = f"?t={int(time.time())}"
-                photo_url_with_cache = photo_url + cache_buster
-                print(f"🔍 Отправка нового фото с кеш-бастером: {photo_url_with_cache}")
-                
-                sent = await message.answer_photo(
-                    photo=photo_url_with_cache,
-                    caption=text,
-                    reply_markup=keyboard.as_markup(),
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
-                await state.update_data(last_message_id=sent.message_id)
-        else:
-            # Текстовое сообщение
-            try:
-                await message.edit_text(
-                    text,
-                    reply_markup=keyboard.as_markup(),
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
-            except Exception as e:
-                print(f"🔍 Ошибка редактирования text: {e}")
-                # Если не получилось, удаляем и создаем новое
-                await message.delete()
-                sent = await message.answer(
-                    text,
-                    reply_markup=keyboard.as_markup(),
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
-                await state.update_data(last_message_id=sent.message_id)
-    except Exception as e:
-        logger.error(f"Ошибка редактирования: {e}")
-        # В крайнем случае создаем новое с кеш-бастером
-        if photo_url:
-            cache_buster = f"?t={int(time.time())}"
+    # ВСЕГДА создаем новое сообщение
+    if photo_url:
+        try:
+            # Добавляем случайный параметр для сброса кеша
+            import random
+            cache_buster = f"?t={random.randint(1000000, 9999999)}"
             photo_url_with_cache = photo_url + cache_buster
+            print(f"🔍 Отправка фото с кеш-бастером: {photo_url_with_cache}")
             
             sent = await message.answer_photo(
                 photo=photo_url_with_cache,
@@ -2367,14 +2296,20 @@ async def show_project(message: Message, state: FSMContext, index: int):
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
-        else:
-            sent = await message.answer(
-                text,
-                reply_markup=keyboard.as_markup(),
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-        await state.update_data(last_message_id=sent.message_id)
+            await state.update_data(last_message_id=sent.message_id)
+            return
+        except Exception as e:
+            logger.error(f"Ошибка фото: {e}")
+            print(f"❌ Ошибка отправки фото: {e}")
+    
+    # Если нет фото или ошибка с фото
+    sent = await message.answer(
+        text,
+        reply_markup=keyboard.as_markup(),
+        parse_mode='HTML',
+        disable_web_page_preview=True
+    )
+    await state.update_data(last_message_id=sent.message_id)
 
 @dp.callback_query(F.data == "proj_prev")
 async def project_prev(callback: CallbackQuery, state: FSMContext):
@@ -2416,6 +2351,7 @@ async def project_next(callback: CallbackQuery, state: FSMContext):
     
     # Получаем текущий индекс
     data = await state.get_data()
+    projects = data.get('projects', [])
     current_index = data.get('current_index', 0)
     
     print(f"\n🔍 NEXT: текущий индекс={current_index}, всего проектов={len(fresh_projects)}")
@@ -6078,6 +6014,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
