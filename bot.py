@@ -1501,6 +1501,27 @@ def delete_project(project_id: int):
         if conn:
             conn.close()
 
+async def force_refresh_projects(state: FSMContext):
+    """Принудительное обновление проектов с очисткой кеша"""
+    # Получаем свежие данные из БД
+    fresh_projects = get_projects()
+    
+    # Полностью очищаем старые данные в состоянии
+    await state.update_data(projects=None)
+    
+    # Сохраняем новые данные
+    if fresh_projects:
+        await state.update_data(projects=fresh_projects)
+        print(f"\n🔍 ПРИНУДИТЕЛЬНОЕ ОБНОВЛЕНИЕ: {len(fresh_projects)} проектов")
+        
+        # Выводим для проверки
+        for i, p in enumerate(fresh_projects):
+            photo = p.get('photo_url')
+            photo_display = photo[:50] + "..." if photo and len(photo) > 50 else (photo or "НЕТ")
+            print(f"   {i}: ID={p['id']}, {p['title']}, фото={photo_display}")
+    
+    return fresh_projects
+
 async def sync_projects_with_db(state: FSMContext):
     """Синхронизирует проекты в состоянии с БД"""
     fresh_projects = get_projects()
@@ -1509,26 +1530,7 @@ async def sync_projects_with_db(state: FSMContext):
         print(f"🔍 СИНХРОНИЗАЦИЯ: проекты обновлены ({len(fresh_projects)} шт.)")
         return fresh_projects
     return None
-
-async def force_refresh_projects(state: FSMContext):
-    """Принудительное обновление проектов с очисткой кеша"""
-    # Получаем свежие данные
-    fresh_projects = get_projects()
     
-    # Полностью очищаем старые данные
-    await state.update_data(projects=None)
-    
-    # Сохраняем новые
-    if fresh_projects:
-        await state.update_data(projects=fresh_projects)
-        print(f"🔍 ПРИНУДИТЕЛЬНОЕ ОБНОВЛЕНИЕ: {len(fresh_projects)} проектов")
-        
-        # Выводим для проверки
-        for p in fresh_projects:
-            photo = p.get('photo_url', 'НЕТ')
-            print(f"   ID: {p['id']}, {p['title']}, фото: {photo[:50] if photo else 'НЕТ'}")
-    
-    return fresh_projects
 # ВРЕМЕННАЯ ФУНКЦИЯ ДЛЯ ПРОВЕРКИ БД
 def check_projects_db():
     """Проверка данных проектов в БД"""
@@ -2276,8 +2278,13 @@ async def show_project(message: Message, state: FSMContext, index: int):
         # Отправляем новое сообщение
         if photo_url:
             try:
+                # Добавляем timestamp для сброса кеша
+                cache_buster = f"?t={int(time.time())}"
+                photo_url_with_cache = photo_url + cache_buster
+                print(f"🔍 Отправка фото с кеш-бастером: {photo_url_with_cache}")
+                
                 sent = await message.answer_photo(
-                    photo=photo_url,
+                    photo=photo_url_with_cache,
                     caption=text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
@@ -2303,6 +2310,7 @@ async def show_project(message: Message, state: FSMContext, index: int):
         if photo_url:
             # Пробуем отправить как фото
             try:
+                # Для редактирования caption не нужно менять URL
                 await message.edit_caption(
                     caption=text,
                     reply_markup=keyboard.as_markup(),
@@ -2310,10 +2318,15 @@ async def show_project(message: Message, state: FSMContext, index: int):
                 )
             except Exception as e:
                 print(f"🔍 Ошибка редактирования caption: {e}")
-                # Если не получилось, удаляем и создаем новое
+                # Если не получилось, удаляем и создаем новое с кеш-бастером
                 await message.delete()
+                
+                cache_buster = f"?t={int(time.time())}"
+                photo_url_with_cache = photo_url + cache_buster
+                print(f"🔍 Отправка нового фото с кеш-бастером: {photo_url_with_cache}")
+                
                 sent = await message.answer_photo(
-                    photo=photo_url,
+                    photo=photo_url_with_cache,
                     caption=text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
@@ -2342,10 +2355,13 @@ async def show_project(message: Message, state: FSMContext, index: int):
                 await state.update_data(last_message_id=sent.message_id)
     except Exception as e:
         logger.error(f"Ошибка редактирования: {e}")
-        # В крайнем случае создаем новое
+        # В крайнем случае создаем новое с кеш-бастером
         if photo_url:
+            cache_buster = f"?t={int(time.time())}"
+            photo_url_with_cache = photo_url + cache_buster
+            
             sent = await message.answer_photo(
-                photo=photo_url,
+                photo=photo_url_with_cache,
                 caption=text,
                 reply_markup=keyboard.as_markup(),
                 parse_mode='HTML',
@@ -6062,6 +6078,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
