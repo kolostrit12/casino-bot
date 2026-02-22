@@ -1500,6 +1500,35 @@ def delete_project(project_id: int):
     finally:
         if conn:
             conn.close()
+
+async def sync_projects_with_db(state: FSMContext):
+    """Синхронизирует проекты в состоянии с БД"""
+    fresh_projects = get_projects()
+    if fresh_projects:
+        await state.update_data(projects=fresh_projects)
+        print(f"🔍 СИНХРОНИЗАЦИЯ: проекты обновлены ({len(fresh_projects)} шт.)")
+        return fresh_projects
+    return None
+
+async def force_refresh_projects(state: FSMContext):
+    """Принудительное обновление проектов с очисткой кеша"""
+    # Получаем свежие данные
+    fresh_projects = get_projects()
+    
+    # Полностью очищаем старые данные
+    await state.update_data(projects=None)
+    
+    # Сохраняем новые
+    if fresh_projects:
+        await state.update_data(projects=fresh_projects)
+        print(f"🔍 ПРИНУДИТЕЛЬНОЕ ОБНОВЛЕНИЕ: {len(fresh_projects)} проектов")
+        
+        # Выводим для проверки
+        for p in fresh_projects:
+            photo = p.get('photo_url', 'НЕТ')
+            print(f"   ID: {p['id']}, {p['title']}, фото: {photo[:50] if photo else 'НЕТ'}")
+    
+    return fresh_projects
 # ВРЕМЕННАЯ ФУНКЦИЯ ДЛЯ ПРОВЕРКИ БД
 def check_projects_db():
     """Проверка данных проектов в БД"""
@@ -2170,77 +2199,55 @@ async def referrals(message: Message):
 
 @dp.message(F.text == "📂 ПРОЕКТЫ")
 async def projects(message: Message, state: FSMContext):
-    """Список проектов с навигацией (в одном сообщении)"""
+    """Список проектов с навигацией"""
     user_id = message.from_user.id
     
-    # ВСЕГДА загружаем свежие данные из БД
-    projects_list = get_projects()
-    
-    # ОТЛАДКА
-    print(f"\n🔍 ЗАГРУЗКА ПРОЕКТОВ ИЗ БД:")
-    for p in projects_list:
-        photo = p.get('photo_url')
-        if photo:
-            # Если фото есть, показываем первые 50 символов
-            photo_display = photo[:50] + "..." if len(photo) > 50 else photo
-        else:
-            photo_display = "НЕТ"
-        print(f"   ID: {p['id']}, Название: {p['title']}, Фото: {photo_display}")
+    # Принудительно обновляем проекты из БД
+    projects_list = await force_refresh_projects(state)
     
     if not projects_list:
         await message.answer("📂 ПРОЕКТЫ\n\nК сожалению, сейчас нет активных проектов.", 
                            reply_markup=get_main_keyboard(user_id))
         return
     
-    # Сохраняем свежий список в состоянии
-    await state.update_data(projects=projects_list, current_index=0)
+    # Устанавливаем начальный индекс
+    await state.update_data(current_index=0, last_message_id=None)
     
     # Показываем первый проект
-    await show_project(message, state, 0, is_new_message=True)
+    await show_project(message, state, 0)
 
 
-async def show_project(message: Message, state: FSMContext, index: int, is_new_message: bool = False):
-    """Показать проект по индексу (с редактированием существующего сообщения)"""
+async def show_project(message: Message, state: FSMContext, index: int):
+    """Показать проект по индексу"""
     data = await state.get_data()
     projects = data.get('projects', [])
+    last_message_id = data.get('last_message_id')
     
-    # ПРОВЕРЯЕМ, НЕТ ЛИ НОВЫХ ДАННЫХ В БД
-    if not is_new_message:
-        # При переключении перезагружаем проекты из БД
-        fresh_projects = get_projects()
-        if fresh_projects:
-            # Обновляем состояние
-            await state.update_data(projects=fresh_projects)
-            projects = fresh_projects
-            print(f"🔍 ПЕРЕЗАГРУЗКА: проекты обновлены из БД")
+    # Дополнительная проверка - если проекты пустые, пробуем загрузить
+    if not projects:
+        print(f"🔍 show_project: проекты пусты, загружаем из БД")
+        projects = await force_refresh_projects(state)
+        if not projects:
+            await message.answer("❌ Проекты не найдены")
+            return
     
-    # ОТЛАДКА
-    print(f"\n🔍 ПОКАЗ ПРОЕКТА индекс={index}")
-    for i, p in enumerate(projects):
-        photo = p.get('photo_url')
-        if photo:
-            photo_display = photo[:50] + "..." if len(photo) > 50 else photo
-        else:
-            photo_display = "НЕТ"
-        print(f"   Проект {i}: ID={p['id']}, title={p['title']}, фото={photo_display}")
-    
-    if not projects or index < 0 or index >= len(projects):
-        await message.answer("❌ Проект не найден")
+    if index < 0 or index >= len(projects):
+        await message.answer("❌ Неверный индекс проекта")
         return
     
     project = projects[index]
-    current_photo = project.get('photo_url')
-    photo_display = current_photo[:50] + "..." if current_photo and len(current_photo) > 50 else (current_photo or "НЕТ")
-    print(f"🔍 ВЫБРАН проект {index}: ID={project['id']}, фото={photo_display}")
     
-    # Формируем текст сообщения
+    print(f"\n🔍 ПОКАЗ ПРОЕКТА {index}: ID={project['id']}, {project['title']}")
+    print(f"🔍 Фото: {project.get('photo_url', 'НЕТ')}")
+    
+    # Формируем текст
     text = (
         f"🎰 <b>{project['title']}</b>\n\n"
         f"📌 <b>Промокод:</b> <code>{project['promo_code']}</code>\n\n"
         f"🔗 <a href='{project['url']}'>Перейти на сайт</a>"
     )
     
-    # Создаем клавиатуру для навигации
+    # Создаем клавиатуру
     keyboard = InlineKeyboardBuilder()
     
     # Кнопки навигации
@@ -2252,130 +2259,130 @@ async def show_project(message: Message, state: FSMContext, index: int, is_new_m
     if nav_row:
         keyboard.row(*nav_row)
     
-    # Кнопка перехода на сайт
     keyboard.row(InlineKeyboardButton(text="🎰 Перейти на сайт", url=project['url']))
-    
-    # Информация о текущем проекте
     keyboard.row(InlineKeyboardButton(
         text=f"📊 Проект {index + 1} из {len(projects)}", 
         callback_data="proj_info"
     ))
-    
-    # Кнопка назад в меню
     keyboard.row(InlineKeyboardButton(text="◀️ В меню", callback_data="back_to_menu"))
     
-    # Обновляем индекс в состоянии
+    # Обновляем индекс
     await state.update_data(current_index=index)
     
-    # ЕСЛИ ЭТО НОВОЕ СООБЩЕНИЕ (первый вход в раздел)
-    if is_new_message:
-        if current_photo:
+    photo_url = project.get('photo_url')
+    
+    # Если это первое сообщение или нужно создать новое
+    if last_message_id is None:
+        # Отправляем новое сообщение
+        if photo_url:
             try:
-                await message.answer_photo(
-                    photo=current_photo,
+                sent = await message.answer_photo(
+                    photo=photo_url,
                     caption=text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
+                await state.update_data(last_message_id=sent.message_id)
                 return
             except Exception as e:
-                logger.error(f"Ошибка при отправке фото: {e}")
-                # Если фото не отправилось, отправляем текст
-                await message.answer(
-                    text,
-                    reply_markup=keyboard.as_markup(),
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
-                return
-        else:
-            await message.answer(
-                text,
-                reply_markup=keyboard.as_markup(),
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-            return
-    
-    # ЕСЛИ ЭТО РЕДАКТИРОВАНИЕ СУЩЕСТВУЮЩЕГО СООБЩЕНИЯ
-    try:
-        # Проверяем, есть ли у сообщения фото
-        is_photo_message = hasattr(message, 'photo') and message.photo is not None
+                logger.error(f"Ошибка фото: {e}")
         
-        if current_photo:
-            # Если у проекта есть фото
-            if is_photo_message:
-                # Текущее сообщение с фото - редактируем caption
+        # Если нет фото или ошибка
+        sent = await message.answer(
+            text,
+            reply_markup=keyboard.as_markup(),
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
+        await state.update_data(last_message_id=sent.message_id)
+        return
+    
+    # Редактируем существующее сообщение
+    try:
+        if photo_url:
+            # Пробуем отправить как фото
+            try:
                 await message.edit_caption(
                     caption=text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML'
                 )
-            else:
-                # Текущее сообщение без фото - удаляем и создаем новое с фото
+            except Exception as e:
+                print(f"🔍 Ошибка редактирования caption: {e}")
+                # Если не получилось, удаляем и создаем новое
                 await message.delete()
-                await message.answer_photo(
-                    photo=current_photo,
+                sent = await message.answer_photo(
+                    photo=photo_url,
                     caption=text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
+                await state.update_data(last_message_id=sent.message_id)
         else:
-            # Если у проекта нет фото
-            if is_photo_message:
-                # Текущее сообщение с фото - удаляем и создаем текстовое
-                await message.delete()
-                await message.answer(
-                    text,
-                    reply_markup=keyboard.as_markup(),
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
-            else:
-                # Текущее сообщение без фото - редактируем текст
+            # Текстовое сообщение
+            try:
                 await message.edit_text(
                     text,
                     reply_markup=keyboard.as_markup(),
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
+            except Exception as e:
+                print(f"🔍 Ошибка редактирования text: {e}")
+                # Если не получилось, удаляем и создаем новое
+                await message.delete()
+                sent = await message.answer(
+                    text,
+                    reply_markup=keyboard.as_markup(),
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+                await state.update_data(last_message_id=sent.message_id)
     except Exception as e:
-        logger.error(f"Ошибка при редактировании сообщения: {e}")
-        # В случае ошибки отправляем новое сообщение
-        if current_photo:
-            await message.answer_photo(
-                photo=current_photo,
+        logger.error(f"Ошибка редактирования: {e}")
+        # В крайнем случае создаем новое
+        if photo_url:
+            sent = await message.answer_photo(
+                photo=photo_url,
                 caption=text,
                 reply_markup=keyboard.as_markup(),
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
         else:
-            await message.answer(
+            sent = await message.answer(
                 text,
                 reply_markup=keyboard.as_markup(),
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
+        await state.update_data(last_message_id=sent.message_id)
 
 @dp.callback_query(F.data == "proj_prev")
 async def project_prev(callback: CallbackQuery, state: FSMContext):
     """Предыдущий проект"""
     await callback.answer()
     
+    # Принудительно обновляем данные из БД
+    fresh_projects = await force_refresh_projects(state)
+    
+    if not fresh_projects:
+        await callback.message.answer("❌ Ошибка загрузки проектов")
+        return
+    
+    # Получаем текущий индекс
     data = await state.get_data()
     current_index = data.get('current_index', 0)
     
-    # Перезагружаем проекты из БД перед переключением
-    fresh_projects = get_projects()
-    if fresh_projects:
-        await state.update_data(projects=fresh_projects)
+    print(f"\n🔍 PREV: текущий индекс={current_index}, всего проектов={len(fresh_projects)}")
     
+    # Проверяем, можем ли перейти назад
     if current_index > 0:
         new_index = current_index - 1
-        await show_project(callback.message, state, new_index, is_new_message=False)
+        print(f"🔍 PREV: переходим к индексу {new_index}")
+        await show_project(callback.message, state, new_index)
     else:
         await callback.answer("Это первый проект", show_alert=True)
 
@@ -2384,19 +2391,24 @@ async def project_next(callback: CallbackQuery, state: FSMContext):
     """Следующий проект"""
     await callback.answer()
     
+    # Принудительно обновляем данные из БД
+    fresh_projects = await force_refresh_projects(state)
+    
+    if not fresh_projects:
+        await callback.message.answer("❌ Ошибка загрузки проектов")
+        return
+    
+    # Получаем текущий индекс
     data = await state.get_data()
-    projects = data.get('projects', [])
     current_index = data.get('current_index', 0)
     
-    # Перезагружаем проекты из БД перед переключением
-    fresh_projects = get_projects()
-    if fresh_projects:
-        await state.update_data(projects=fresh_projects)
-        projects = fresh_projects
+    print(f"\n🔍 NEXT: текущий индекс={current_index}, всего проектов={len(fresh_projects)}")
     
-    if current_index < len(projects) - 1:
+    # Проверяем, можем ли перейти дальше
+    if current_index < len(fresh_projects) - 1:
         new_index = current_index + 1
-        await show_project(callback.message, state, new_index, is_new_message=False)
+        print(f"🔍 NEXT: переходим к индексу {new_index}")
+        await show_project(callback.message, state, new_index)
     else:
         await callback.answer("Это последний проект", show_alert=True)
 
@@ -2411,13 +2423,11 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
     
-    # Удаляем текущее сообщение
     try:
         await callback.message.delete()
-    except Exception as e:
-        logger.error(f"Ошибка при удалении сообщения: {e}")
+    except:
+        pass
     
-    # Отправляем новое с главной клавиатурой
     await callback.message.answer(
         "Выберите действие:",
         reply_markup=get_main_keyboard(callback.from_user.id)
@@ -6052,6 +6062,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
