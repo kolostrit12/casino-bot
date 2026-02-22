@@ -1373,7 +1373,15 @@ def get_projects(include_inactive: bool = False) -> List:
             c.execute("SELECT * FROM projects ORDER BY id")
         else:
             c.execute("SELECT * FROM projects WHERE is_active = 1 ORDER BY id")
-        return [dict(row) for row in c.fetchall()]
+        results = c.fetchall()
+        
+        # ОТЛАДКА
+        print(f"\n🔍 get_projects() вернула {len(results)} проектов:")
+        for row in results:
+            photo = row['photo_url'] if row['photo_url'] else "НЕТ"
+            print(f"   ID: {row['id']}, Название: {row['title'][:20]}, Фото: {photo[:30] if photo != 'НЕТ' else photo}")
+        
+        return [dict(row) for row in results]
     finally:
         if conn:
             conn.close()
@@ -1450,7 +1458,29 @@ def delete_project(project_id: int):
     finally:
         if conn:
             conn.close()
-
+# ВРЕМЕННАЯ ФУНКЦИЯ ДЛЯ ПРОВЕРКИ БД
+def check_projects_db():
+    """Проверка данных проектов в БД"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT id, title, photo_url FROM projects ORDER BY id")
+        results = c.fetchall()
+        print("\n🔍 ДАННЫЕ В БАЗЕ ПРОЕКТОВ:")
+        print("-" * 50)
+        for row in results:
+            photo = row['photo_url'] if row['photo_url'] else "НЕТ ФОТО"
+            print(f"ID: {row['id']}, Название: {row['title']}")
+            print(f"Фото: {photo[:100] if photo != 'НЕТ ФОТО' else photo}")
+            print("-" * 50)
+        return results
+    except Exception as e:
+        print(f"❌ Ошибка при проверке БД: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
 # ==================== ФУНКЦИИ ДЛЯ ДЖЕКПОТА ====================
 
 @retry_on_locked()
@@ -3346,6 +3376,12 @@ async def edit_project_finish(message: Message, state: FSMContext):
     
     if update_data:
         if update_project(project_id, **update_data):
+            # ПРОВЕРКА ПОСЛЕ ОБНОВЛЕНИЯ
+            print(f"\n🔍 ПРОВЕРКА ПОСЛЕ ОБНОВЛЕНИЯ ПРОЕКТА {project_id}:")
+            updated = get_project_by_id(project_id)
+            if updated:
+                print(f"   Название: {updated['title']}")
+                print(f"   Фото: {updated.get('photo_url', 'НЕТ')}")
             await message.answer(f"✅ Проект обновлен!")
             await asyncio.sleep(1)
             
@@ -5925,11 +5961,13 @@ async def main():
     migrate_projects_table()
     migrate_promocodes_table()
     migrate_shop_table()  # ЭТА СТРОКА ДОЛЖНА БЫТЬ
+    check_projects_db()
     print("✅ Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
