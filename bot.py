@@ -1412,6 +1412,15 @@ def create_submission(task_id: int, user_id: int, project_id: int = None,
     try:
         conn = get_db()
         c = conn.cursor()
+        
+        # Проверка на уже существующую заявку
+        c.execute("""
+            SELECT id FROM task_submissions 
+            WHERE user_id = ? AND task_id = ? AND status IN ('pending', 'approved')
+        """, (user_id, task_id))
+        if c.fetchone():
+            return None  # Уже есть активная или одобренная заявка
+        
         c.execute("""
             INSERT INTO task_submissions 
             (task_id, user_id, project_id, status, reward_points, reward_spins) 
@@ -1571,6 +1580,39 @@ def get_user_submissions(user_id: int, limit: int = 10) -> List:
             LIMIT ?
         """, (user_id, limit))
         return [dict(row) for row in c.fetchall()]
+    finally:
+        if conn:
+            conn.close()
+@retry_on_locked()
+def check_user_completed_task(user_id: int, task_id: int) -> bool:
+    """Проверяет, выполнил ли пользователь задание ранее"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            SELECT id FROM task_submissions 
+            WHERE user_id = ? AND task_id = ? AND status = 'approved'
+        """, (user_id, task_id))
+        return c.fetchone() is not None
+    finally:
+        if conn:
+            conn.close()
+
+@retry_on_locked()
+def get_user_task_status(user_id: int, task_id: int) -> str:
+    """Получить статус заявки пользователя по заданию"""
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            SELECT status FROM task_submissions 
+            WHERE user_id = ? AND task_id = ?
+            ORDER BY id DESC LIMIT 1
+        """, (user_id, task_id))
+        row = c.fetchone()
+        return row['status'] if row else None
     finally:
         if conn:
             conn.close()
@@ -5004,39 +5046,43 @@ async def review_submission(callback: CallbackQuery):
     
     await safe_edit_message(callback.message, text, reply_markup=keyboard.as_markup(), parse_mode='HTML')
 
-@dp.callback_query(F.data.startswith("view_media_"))
+@dp.callback_query(F.data.startswith("view_submission_"))
 async def view_submission_media(callback: CallbackQuery):
-    """Просмотр медиафайла заявки"""
+    """Просмотр медиафайлов заявки"""
     await callback.answer()
     
-    parts = callback.data.split("_")
-    submission_id = int(parts[2])
-    media_id = int(parts[3])
-    
-    # Получаем информацию о медиафайле
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute("SELECT * FROM submission_media WHERE id = ?", (media_id,))
-        media = c.fetchone()
-    
-    if not media:
-        await callback.answer("❌ Файл не найден", show_alert=True)
+    try:
+        # Разбираем callback_data: view_submission_ID
+        parts = callback.data.split("_")
+        submission_id = int(parts[2])
+    except (IndexError, ValueError):
+        await callback.answer("❌ Неверный формат данных", show_alert=True)
         return
     
-    # Отправляем файл
-    try:
-        if media['file_type'] == 'photo':
-            await callback.message.answer_photo(
-                media['file_id'],
-                caption=f"📸 Файл из заявки #{submission_id}"
-            )
-        else:  # video
-            await callback.message.answer_video(
-                media['file_id'],
-                caption=f"🎥 Видео из заявки #{submission_id}"
-            )
-    except Exception as e:
-        await callback.message.answer(f"❌ Ошибка при загрузке файла: {e}")
+    # Получаем все медиафайлы заявки
+    media_files = get_submission_media(submission_id)
+    
+    if not media_files:
+        await callback.answer("❌ Файлы не найдены", show_alert=True)
+        return
+    
+    # Отправляем все файлы по одному
+    for media in media_files:
+        try:
+            if media['file_type'] == 'photo':
+                await callback.message.answer_photo(
+                    media['file_id'],
+                    caption=f"📸 Файл из заявки #{submission_id}"
+                )
+            else:  # video
+                await callback.message.answer_video(
+                    media['file_id'],
+                    caption=f"🎥 Видео из заявки #{submission_id}"
+                )
+            await asyncio.sleep(0.5)  # Небольшая задержка между файлами
+        except Exception as e:
+            logger.error(f"Ошибка при отправке файла: {e}")
+            await callback.message.answer(f"❌ Ошибка при загрузке файла")
 
 @dp.callback_query(F.data.startswith("approve_submission_"))
 async def approve_submission_handler(callback: CallbackQuery):
@@ -5074,7 +5120,7 @@ async def approve_submission_handler(callback: CallbackQuery):
             f"✅ Заявка #{submission_id} одобрена!\n\n"
             f"Награда начислена пользователю.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ К списку заявок", callback_data="check_pending_submissions")]
+                [InlineKeyboardButton(text="◀️ К списку заявок", callback_data="back_to_pending_list")]
             ])
         )
     else:
@@ -5132,14 +5178,26 @@ async def process_reject_reason(message: Message, state: FSMContext):
         await message.answer(
             f"❌ Заявка #{submission_id} отклонена",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ К списку заявок", callback_data="check_pending_submissions")]
+                [InlineKeyboardButton(text="◀️ К списку заявок", callback_data="back_to_pending_list")]
             ])
         )
     else:
         await message.answer("❌ Ошибка при отклонении заявки")
     
     await state.clear()
-
+@dp.callback_query(F.data == "back_to_pending_list")
+async def back_to_pending_list(callback: CallbackQuery):
+    """Возврат к списку ожидающих заявок"""
+    await callback.answer()
+    
+    # Создаем фейковый callback для вызова check_pending_submissions
+    fake_callback = type('obj', (object,), {
+        'message': callback.message,
+        'from_user': callback.from_user,
+        'answer': lambda *args, **kwargs: None,
+        'data': "check_pending_submissions"
+    })
+    await check_pending_submissions(fake_callback)
 @dp.callback_query(F.data == "add_verification_task")
 async def add_verification_task_start(callback: CallbackQuery, state: FSMContext):
     """Начало добавления задания с проверкой"""
@@ -7287,6 +7345,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
